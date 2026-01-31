@@ -257,6 +257,10 @@ def generate_scripts():
         print(f"📥 NEW REQUEST: {len(videos)} videos, {num_scripts} scripts")
         print(f"{'='*60}\n")
         
+        for i, v in enumerate(videos):
+            print(f"Video {i+1}: {v.get('title', 'Unknown')}")
+            print(f"  Transcript length: {len(v.get('transcript', ''))} chars\n")
+        
         # Generate scripts
         print(f"🎬 Generating {num_scripts} viral scripts...")
         raw_scripts = create_instagram_scripts(videos, num_scripts)
