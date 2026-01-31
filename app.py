@@ -10,7 +10,6 @@ import time
 import gspread
 from google.oauth2.service_account import Credentials
 import json
-import os
 
 app = Flask(__name__)
 CORS(app)
@@ -49,39 +48,75 @@ def get_summary(text, max_sentences=8):
 
 
 def get_transcript_with_retry(video_id, max_retries=3):
-    """Fetch transcript with retry logic - EXACT COPY from working script"""
+    """Fetch transcript with Webshare proxy bypass"""
+    
+    WEBSHARE_PROXY = os.getenv("WEBSHARE_PROXY")
+    
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
                 time.sleep(2)
             
-            # Create instance (v1.2.4 uses instance method, not class method)
+            # Create YouTubeTranscriptApi instance
             ytt_api = YouTubeTranscriptApi()
             
+            # Set up proxy session if available
+            if WEBSHARE_PROXY:
+                print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
+                
+                # Create proxies dict
+                proxies = {
+                    'http': f'http://{WEBSHARE_PROXY}',
+                    'https': f'http://{WEBSHARE_PROXY}'
+                }
+                
+                # Monkey-patch requests to use proxy
+                import youtube_transcript_api._api as api_module
+                original_get = requests.get
+                
+                def proxied_get(url, **kwargs):
+                    kwargs['proxies'] = proxies
+                    kwargs['timeout'] = 30
+                    return original_get(url, **kwargs)
+                
+                requests.get = proxied_get
+            else:
+                print(f"   ⚠️ No proxy configured - will likely fail!")
+            
+            # Try to fetch transcript
             for lang in ['hi', 'en']:
                 try:
                     print(f"   Trying {lang}...")
-                    # Use .fetch() on instance (v1.2.4 specific)
                     transcript_data = ytt_api.fetch(video_id, languages=[lang])
-                    # Use .text attribute (v1.2.4 returns objects with .text, not dicts)
                     full_text = ' '.join([entry.text for entry in transcript_data])
                     print(f"   ✅ Got transcript: {len(full_text)} chars in {lang}")
+                    
+                    # Restore original requests.get
+                    if WEBSHARE_PROXY:
+                        requests.get = original_get
+                    
                     return full_text, lang
                 except Exception as e:
                     print(f"   {lang} failed: {str(e)[:100]}")
                     continue
+            
+            # Restore original requests.get
+            if WEBSHARE_PROXY:
+                requests.get = original_get
             
             raise Exception("No transcript available in Hindi or English")
             
         except Exception as e:
             print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
             if attempt == max_retries - 1:
+                # Restore original requests.get before raising
+                if WEBSHARE_PROXY:
+                    requests.get = original_get
                 raise e
             continue
     
     return None, None
-
 
 def create_ai_summary(transcript, video_id, language):
     """Create AI summary"""
