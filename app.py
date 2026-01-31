@@ -52,7 +52,13 @@ def get_summary(text, max_sentences=8):
 
 
 def get_transcript_with_retry(video_id, max_retries=3):
-    """Fetch transcript with Webshare proxy bypass - PROPERLY ISOLATED"""
+    """Fetch transcript - SIMPLE version using env proxy"""
+    
+    # Set proxy environment variables if WEBSHARE_PROXY is configured
+    if WEBSHARE_PROXY:
+        os.environ['HTTP_PROXY'] = f'http://{WEBSHARE_PROXY}'
+        os.environ['HTTPS_PROXY'] = f'http://{WEBSHARE_PROXY}'
+        print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
     
     for attempt in range(max_retries):
         try:
@@ -60,65 +66,45 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
                 time.sleep(2)
             
-            # Create session with proxy
-            session = requests.Session()
-            
-            if WEBSHARE_PROXY:
-                print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
-                session.proxies = {
-                    'http': f'http://{WEBSHARE_PROXY}',
-                    'https': f'http://{WEBSHARE_PROXY}'
-                }
-            else:
-                print(f"   ⚠️ No proxy configured!")
-            
-            # Patch youtube_transcript_api to use our session
-            from youtube_transcript_api import _api
-            
-            # Store original
-            original_session_get = _api.requests.Session.get if hasattr(_api.requests.Session, 'get') else None
-            
-            # Create custom get that uses our session
-            def custom_get(self, url, **kwargs):
-                return session.get(url, **kwargs)
-            
-            # Apply patch ONLY to youtube_transcript_api's requests
-            _api.requests.Session.get = custom_get
-            
-            # Now fetch transcript
+            # Just use the library normally - it will use env proxy
+            from youtube_transcript_api import YouTubeTranscriptApi
             ytt_api = YouTubeTranscriptApi()
-            
-            transcript_found = False
-            full_text = None
-            lang = None
             
             for lang_code in ['hi', 'en']:
                 try:
                     print(f"   Trying {lang_code}...")
                     transcript_data = ytt_api.fetch(video_id, languages=[lang_code])
                     full_text = ' '.join([entry.text for entry in transcript_data])
-                    lang = lang_code
-                    transcript_found = True
-                    print(f"   ✅ Got transcript: {len(full_text)} chars in {lang}")
-                    break
+                    print(f"   ✅ Got transcript: {len(full_text)} chars in {lang_code}")
+                    
+                    # Clear proxy env vars after success
+                    if WEBSHARE_PROXY:
+                        os.environ.pop('HTTP_PROXY', None)
+                        os.environ.pop('HTTPS_PROXY', None)
+                    
+                    return full_text, lang_code
+                    
                 except Exception as e:
                     print(f"   {lang_code} failed: {str(e)[:100]}")
                     continue
             
-            # Restore original IMMEDIATELY
-            if original_session_get:
-                _api.requests.Session.get = original_session_get
-            
-            if transcript_found:
-                return full_text, lang
-            else:
-                raise Exception("No transcript available")
+            raise Exception("No transcript available")
             
         except Exception as e:
             print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
             if attempt == max_retries - 1:
+                # Clear proxy env vars before raising
+                if WEBSHARE_PROXY:
+                    os.environ.pop('HTTP_PROXY', None)
+                    os.environ.pop('HTTPS_PROXY', None)
                 raise e
+            time.sleep(3)
             continue
+    
+    # Clear proxy env vars before returning
+    if WEBSHARE_PROXY:
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
     
     return None, None
 
