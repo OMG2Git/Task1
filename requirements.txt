@@ -1,6 +1,5 @@
 Flask==3.0.0
 flask-cors==4.0.0
-assemblyai==0.30.0
 requests==2.31.0
 beautifulsoup4==4.12.2
 gspread==5.12.0

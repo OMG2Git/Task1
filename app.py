@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import assemblyai as aai
 import os
 import requests
 from bs4 import BeautifulSoup
@@ -16,12 +15,9 @@ CORS(app)
 
 # ========== CONFIGURATION ==========
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
-ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
-
-# Configure AssemblyAI
-aai.settings.api_key = ASSEMBLYAI_API_KEY
 
 NEWS_SOURCES = {
     "Lokmat Maharashtra": "https://www.lokmat.com/maharashtra/",
@@ -34,32 +30,49 @@ def extract_video_id(url):
     match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
     return match.group(1) if match else None
 
-def transcribe_with_assemblyai(video_id):
-    """Transcribe YouTube video using AssemblyAI (bypasses all blocking)"""
+def get_transcript_rapidapi(video_id):
+    """Get transcript using RapidAPI YouTube Transcript service"""
     try:
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        print(f"   🎙️ Transcribing with AssemblyAI: {video_id}...")
+        print(f"   📝 Fetching transcript via RapidAPI: {video_id}...")
         
-        # Configure for Hindi audio
-        config = aai.TranscriptionConfig(
-            language_code="hi",
-            speech_model=aai.SpeechModel.best
-        )
+        url = "https://youtube-transcript-api1.p.rapidapi.com/youtube/transcript"
         
-        transcriber = aai.Transcriber(config=config)
-        transcript = transcriber.transcribe(youtube_url)
+        querystring = {"video_id": video_id}
         
-        # Wait for completion
-        if transcript.status == aai.TranscriptStatus.error:
-            raise Exception(transcript.error)
+        headers = {
+            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": "youtube-transcript-api1.p.rapidapi.com"
+        }
         
-        transcript_text = transcript.text.strip()
-        print(f"   ✅ Transcribed: {len(transcript_text)} chars")
+        response = requests.get(url, headers=headers, params=querystring, timeout=30)
+        response.raise_for_status()
         
-        return transcript_text, 'hi'
+        data = response.json()
+        
+        # Handle different response formats
+        if isinstance(data, dict) and 'transcript' in data:
+            transcript_parts = data['transcript']
+        elif isinstance(data, list):
+            transcript_parts = data
+        else:
+            raise Exception(f"Unexpected response format: {str(data)[:200]}")
+        
+        # Combine all transcript parts
+        transcript = ' '.join([item.get('text', '') for item in transcript_parts if isinstance(item, dict)])
+        
+        if not transcript or len(transcript) < 100:
+            raise Exception("Transcript too short or empty")
+        
+        print(f"   ✅ Got transcript: {len(transcript)} chars")
+        
+        # Detect language (Hindi has Devanagari script)
+        devanagari_count = sum(1 for c in transcript[:500] if '\u0900' <= c <= '\u097F')
+        lang = 'hi' if devanagari_count > 20 else 'en'
+        
+        return transcript, lang
         
     except Exception as e:
-        print(f"   ❌ AssemblyAI failed: {str(e)}")
+        print(f"   ❌ RapidAPI failed: {str(e)}")
         return None, None
 
 def call_perplexity_api(prompt, max_tokens=2500):
@@ -348,13 +361,13 @@ def home():
     return jsonify({
         'status': 'online',
         'service': 'Instagram Reels Script Generator API',
-        'version': '6.0.0 - AssemblyAI + Perplexity Pipeline',
+        'version': '7.0.0 - RapidAPI + Perplexity Pipeline',
         'endpoints': {
             'POST /generate': 'Generate viral scripts from YouTube videos',
             'GET /health': 'Check API health'
         },
         'pipeline': {
-            'transcription': 'AssemblyAI (5 hours FREE/month)',
+            'transcription': 'RapidAPI YouTube Transcript (500 req/month FREE)',
             'ai_processing': 'Perplexity Sonar Pro API ($5 credit/month)',
             'storage': 'Google Sheets (FREE)'
         }
@@ -364,7 +377,7 @@ def home():
 def health():
     """Health check"""
     has_perplexity = bool(PERPLEXITY_API_KEY)
-    has_assemblyai = bool(ASSEMBLYAI_API_KEY)
+    has_rapidapi = bool(RAPIDAPI_KEY)
     has_google = bool(GOOGLE_CREDS_JSON)
     
     return jsonify({
@@ -372,7 +385,7 @@ def health():
         'timestamp': datetime.now().isoformat(),
         'config': {
             'perplexity_api_configured': has_perplexity,
-            'assemblyai_api_configured': has_assemblyai,
+            'rapidapi_configured': has_rapidapi,
             'google_sheets_configured': has_google,
             'sheet_name': GOOGLE_SHEET_NAME
         }
@@ -389,10 +402,10 @@ def generate_scripts():
                 'message': 'PERPLEXITY_API_KEY not configured. Get it from https://www.perplexity.ai/settings/api'
             }), 500
         
-        if not ASSEMBLYAI_API_KEY:
+        if not RAPIDAPI_KEY:
             return jsonify({
                 'status': 'error',
-                'message': 'ASSEMBLYAI_API_KEY not configured. Get it from https://www.assemblyai.com/dashboard/signup'
+                'message': 'RAPIDAPI_KEY not configured. Get it from https://rapidapi.com/Glavier/api/youtube-transcript-api1'
             }), 500
         
         if not GOOGLE_CREDS_JSON:
@@ -446,8 +459,8 @@ def generate_scripts():
             try:
                 print(f"📹 Processing video {idx+1}/{len(video_urls)}: {video_id}")
                 
-                # Transcribe with AssemblyAI
-                transcript, lang = transcribe_with_assemblyai(video_id)
+                # Get transcript with RapidAPI
+                transcript, lang = get_transcript_rapidapi(video_id)
                 if not transcript:
                     continue
                 
@@ -520,7 +533,7 @@ def generate_scripts():
                 'sheet_url': sheet_url,
                 'credibility': credibility,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'pipeline_used': 'AssemblyAI → Perplexity Sonar Pro → Google Sheets',
+                'pipeline_used': 'RapidAPI → Perplexity Sonar Pro → Google Sheets',
                 'scripts': [
                     {
                         'number': s['number'],
@@ -543,7 +556,7 @@ def generate_scripts():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 7860))
     print(f"\n🚀 Starting Instagram Reels Script Generator...")
-    print(f"🎙️ Transcription: AssemblyAI")
+    print(f"📝 Transcription: RapidAPI YouTube Transcript")
     print(f"🤖 AI Processing: Perplexity Sonar Pro")
     print(f"📊 Storage: Google Sheets")
     print(f"🌐 Port: {port}\n")
