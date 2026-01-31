@@ -49,23 +49,19 @@ def get_transcript_with_gemini(video_id, max_retries=3):
             
             print(f"   🤖 Using Gemini 2.0 Flash to transcribe {video_id}...")
             
-            # Gemini 2.0 Flash can directly process YouTube URLs!
+            # CORRECTED API call for v1.61.0
             response = gemini_client.models.generate_content(
                 model='gemini-2.0-flash-exp',
-                contents=Content(
-                    parts=[
-                        Part.from_text(
-                            "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
-                            "Include ALL spoken words in the original language (Hindi/Marathi/English). "
-                            "Do NOT summarize - provide the FULL transcript exactly as spoken. "
-                            "Format: Just the transcript text, no extra commentary."
-                        ),
-                        Part.from_uri(
-                            file_uri=youtube_url,
-                            mime_type="video/*"
-                        )
-                    ]
-                ),
+                contents=[
+                    "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
+                    "Include ALL spoken words in the original language (Hindi/Marathi/English). "
+                    "Do NOT summarize - provide the FULL transcript exactly as spoken. "
+                    "Format: Just the transcript text, no extra commentary.",
+                    Part.from_uri(
+                        file_uri=youtube_url,
+                        mime_type="video/*"
+                    )
+                ],
                 config=GenerateContentConfig(
                     temperature=0.1,
                     max_output_tokens=8000
@@ -100,6 +96,7 @@ def get_transcript_with_gemini(video_id, max_retries=3):
             continue
     
     return None, None
+
 
 def create_ai_summary_with_gemini(transcript, video_id, language):
     """
