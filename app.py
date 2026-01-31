@@ -1,7 +1,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from youtube_transcript_api import YouTubeTranscriptApi
 from google import genai
-from google.genai.types import GenerateContentConfig, Part
+from google.genai.types import GenerateContentConfig
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -16,7 +17,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ========== CONFIGURATION ==========
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Get free key from https://aistudio.google.com/
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
 
@@ -34,74 +35,47 @@ def extract_video_id(url):
     match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
     return match.group(1) if match else None
 
-def get_transcript_with_gemini(video_id, max_retries=3):
+def get_transcript_simple(video_id, max_retries=3):
     """
-    Extract transcript directly from YouTube using Gemini 1.5 Flash
-    FREE TIER: 15 RPM, 1500 RPD - Perfect for this use case!
+    Get transcript using youtube-transcript-api (NO PROXY)
+    Railway US servers should not be blocked by YouTube
     """
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-    
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
-                time.sleep(3)
+                time.sleep(2)
             
-            print(f"   🤖 Using Gemini 1.5 Flash to transcribe {video_id}...")
+            print(f"   📝 Fetching transcript for {video_id}...")
             
-            # Gemini 1.5 Flash can directly process YouTube URLs!
-            response = gemini_client.models.generate_content(
-                model='gemini-1.5-flash-latest',
-                contents=[
-                    "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
-                    "Include ALL spoken words in the original language (Hindi/Marathi/English). "
-                    "Do NOT summarize - provide the FULL transcript exactly as spoken. "
-                    "Format: Just the transcript text, no extra commentary.",
-                    Part.from_uri(
-                        file_uri=youtube_url,
-                        mime_type="video/*"
-                    )
-                ],
-                config=GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=8000
-                )
-            )
+            # Try both Hindi and English
+            for lang_code in ['hi', 'mr', 'en']:
+                try:
+                    print(f"   Trying {lang_code}...")
+                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang_code])
+                    transcript_text = ' '.join([entry['text'] for entry in transcript_list])
+                    
+                    if len(transcript_text) > 100:
+                        print(f"   ✅ Got transcript: {len(transcript_text)} chars in {lang_code}")
+                        return transcript_text, lang_code
+                        
+                except Exception as e:
+                    print(f"   {lang_code} failed: {str(e)[:100]}")
+                    continue
             
-            transcript_text = response.text.strip()
-            
-            if transcript_text and len(transcript_text) > 100:
-                print(f"   ✅ Got transcript: {len(transcript_text)} chars")
-                
-                # Detect language (Devanagari script = Hindi/Marathi)
-                devanagari_count = sum(1 for c in transcript_text[:500] if '\u0900' <= c <= '\u097F')
-                lang = 'hi' if devanagari_count > 20 else 'en'
-                
-                return transcript_text, lang
-            else:
-                raise Exception("Transcript too short or empty")
+            raise Exception("No transcript available in any language")
             
         except Exception as e:
-            error_msg = str(e)
-            print(f"   ❌ Attempt {attempt + 1} failed: {error_msg[:200]}")
-            
-            # Handle rate limits gracefully
-            if '429' in error_msg or 'quota' in error_msg.lower():
-                print(f"   ⏳ Rate limit hit, waiting {10 * (attempt + 1)} seconds...")
-                time.sleep(10 * (attempt + 1))
-            
+            print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
             if attempt == max_retries - 1:
                 raise e
-            time.sleep(5)
+            time.sleep(3)
             continue
     
     return None, None
 
 def create_ai_summary_with_gemini(transcript, video_id, language):
-    """
-    Create AI summary using Gemini 1.5 Flash
-    FREE TIER: 15 RPM, 1500 RPD - More than enough!
-    """
+    """Create AI summary using Gemini 1.5 Flash"""
     try:
         truncated = transcript[:15000] if len(transcript) > 15000 else transcript
         
@@ -143,7 +117,6 @@ Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/H
         
     except Exception as e:
         print(f"   ⚠️ AI summary failed: {str(e)}")
-        # Fallback to simple extraction
         sentences = [s.strip() for s in transcript.replace('!', '.').replace('?', '.').split('.') if len(s.strip()) > 30]
         return '\n'.join(sentences[:15])
 
@@ -170,10 +143,7 @@ def scrape_news_headlines(url, source_name):
         return []
 
 def verify_news_with_gemini(all_summaries, scraped_news):
-    """
-    Verify news credibility using Gemini 1.5 Flash
-    FREE TIER: Perfect for this task!
-    """
+    """Verify news credibility using Gemini 1.5 Flash"""
     try:
         video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
         news_text = '\n'.join(scraped_news[:30])
@@ -217,13 +187,10 @@ EXPLANATION: [Brief explanation of the score]"""
         
     except Exception as e:
         print(f"   ⚠️ Verification failed: {str(e)}")
-        return "Verification unavailable due to API limits"
+        return "Verification unavailable"
 
 def create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification):
-    """
-    Generate viral Instagram scripts using Gemini 1.5 Flash
-    FREE TIER: 15 RPM, 1500 RPD - Perfect!
-    """
+    """Generate viral Instagram scripts using Gemini 1.5 Flash"""
     try:
         combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
         
@@ -269,7 +236,7 @@ Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
             model='gemini-1.5-flash-latest',
             contents=prompt,
             config=GenerateContentConfig(
-                temperature=0.95,  # High creativity
+                temperature=0.95,
                 max_output_tokens=8000
             )
         )
@@ -336,15 +303,9 @@ def upload_to_sheets(scripts, video_count, credibility):
         except:
             worksheet = spreadsheet.add_worksheet(title="Scripts", rows=1000, cols=10)
             headers = [
-                'Timestamp', 
-                'Script Number', 
-                'Title', 
-                'Theme', 
-                'Script Content', 
-                'Word Count',
-                'Videos Processed',
-                'Credibility',
-                'Status'
+                'Timestamp', 'Script Number', 'Title', 'Theme', 
+                'Script Content', 'Word Count', 'Videos Processed',
+                'Credibility', 'Status'
             ]
             worksheet.update('A1:I1', [headers])
             worksheet.format('A1:I1', {
@@ -355,21 +316,14 @@ def upload_to_sheets(scripts, video_count, credibility):
         
         existing = worksheet.get_all_values()
         next_row = len(existing) + 1
-        
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         rows = []
         for s in scripts:
             rows.append([
-                timestamp,
-                s['number'],
-                s['title'],
-                s['theme'],
-                s['content'],
-                s['word_count'],
-                video_count,
-                credibility,
-                'Ready for Use'
+                timestamp, s['number'], s['title'], s['theme'],
+                s['content'], s['word_count'], video_count,
+                credibility, 'Ready for Use'
             ])
         
         if rows:
@@ -382,94 +336,45 @@ def upload_to_sheets(scripts, video_count, credibility):
     except Exception as e:
         raise Exception(f"Sheet upload error: {str(e)}")
 
-# ========== API ENDPOINTS ==========
-
 @app.route('/', methods=['GET'])
 def home():
-    """Health check endpoint"""
     return jsonify({
         'status': 'online',
-        'service': 'Instagram Reels Script Generator API (Gemini-Powered)',
-        'version': '3.1.0',
-        'model': 'Gemini 1.5 Flash (Stable, FREE)',
-        'endpoints': {
-            'POST /generate': 'Generate viral scripts from YouTube videos',
-            'GET /health': 'Check API health'
-        },
-        'features': {
-            'transcript_source': 'Gemini 1.5 Flash (Direct YouTube URL)',
-            'script_length': '450-550 words per script',
-            'stories_per_script': '7-9 different stories',
-            'language': 'Hinglish (55% Hindi + 45% English)',
-            'tone': 'Conversational influencer style',
-            'free_tier_limits': '15 RPM, 1500 RPD (Gemini 1.5 Flash)'
-        }
+        'service': 'Instagram Reels Script Generator',
+        'version': '4.0.0',
+        'transcript': 'youtube-transcript-api (no proxy)',
+        'ai': 'Gemini 1.5 Flash (text processing only)'
     }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check"""
-    has_gemini = bool(GEMINI_API_KEY)
-    has_google = bool(GOOGLE_CREDS_JSON)
-    
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'config': {
-            'gemini_api_configured': has_gemini,
-            'google_sheets_configured': has_google,
-            'sheet_name': GOOGLE_SHEET_NAME,
-            'model': 'Gemini 1.5 Flash (Stable)'
-        }
+        'gemini_configured': bool(GEMINI_API_KEY),
+        'sheets_configured': bool(GOOGLE_CREDS_JSON)
     }), 200
 
 @app.route('/generate', methods=['POST'])
 def generate_scripts():
-    """Main endpoint to generate scripts"""
-    
     try:
-        if not GEMINI_API_KEY:
-            return jsonify({
-                'status': 'error',
-                'message': 'GEMINI_API_KEY not configured. Get free key from https://aistudio.google.com/'
-            }), 500
-        
-        if not GOOGLE_CREDS_JSON:
-            return jsonify({
-                'status': 'error',
-                'message': 'GOOGLE_CREDS_JSON not configured in environment variables'
-            }), 500
+        if not GEMINI_API_KEY or not GOOGLE_CREDS_JSON:
+            return jsonify({'status': 'error', 'message': 'Missing API keys'}), 500
         
         data = request.get_json()
-        
         if not data:
-            return jsonify({
-                'status': 'error',
-                'message': 'No JSON data provided'
-            }), 400
+            return jsonify({'status': 'error', 'message': 'No JSON data'}), 400
         
         video_urls = data.get('video_urls', [])
         num_scripts = data.get('num_scripts', 2)
         
-        if not video_urls or len(video_urls) == 0:
-            return jsonify({
-                'status': 'error',
-                'message': 'Please provide at least 1 video URL'
-            }), 400
-        
-        if not isinstance(video_urls, list):
-            return jsonify({
-                'status': 'error',
-                'message': 'video_urls must be a list'
-            }), 400
+        if not video_urls or not isinstance(video_urls, list):
+            return jsonify({'status': 'error', 'message': 'Invalid video_urls'}), 400
         
         if num_scripts < 1 or num_scripts > 5:
-            return jsonify({
-                'status': 'error',
-                'message': 'num_scripts must be between 1 and 5'
-            }), 400
+            return jsonify({'status': 'error', 'message': 'num_scripts must be 1-5'}), 400
         
-        print(f"📥 Processing {len(video_urls)} videos with Gemini 1.5 Flash...")
+        print(f"📥 Processing {len(video_urls)} videos...")
         
         all_summaries = []
         processed_count = 0
@@ -477,102 +382,63 @@ def generate_scripts():
         for idx, url in enumerate(video_urls[:5]):
             video_id = extract_video_id(url)
             if not video_id:
-                print(f"⚠️ Invalid URL: {url}")
                 continue
             
             try:
-                print(f"📹 Processing video {idx+1}/{len(video_urls)}: {video_id}")
+                print(f"📹 Video {idx+1}/{len(video_urls)}: {video_id}")
                 
-                # Use Gemini to get transcript
-                transcript, lang = get_transcript_with_gemini(video_id)
+                transcript, lang = get_transcript_simple(video_id)
                 if not transcript:
-                    print(f"⚠️ No transcript for {video_id}")
                     continue
                 
-                # Use Gemini to create summary
                 summary = create_ai_summary_with_gemini(transcript, video_id, lang)
                 all_summaries.append(summary)
                 processed_count += 1
                 
-                print(f"✅ Video {idx+1} processed successfully")
-                
-                # Rate limit protection (FREE tier: 15 RPM)
-                if idx < len(video_urls) - 1:
-                    time.sleep(5)  # Wait 5 seconds between videos
+                print(f"✅ Video {idx+1} processed")
+                time.sleep(2)
                 
             except Exception as e:
-                print(f"❌ Error processing video {idx+1}: {str(e)}")
+                print(f"❌ Error video {idx+1}: {str(e)}")
                 continue
         
         if processed_count == 0:
-            return jsonify({
-                'status': 'error',
-                'message': 'No videos could be processed. Check video URLs and API limits.'
-            }), 400
-        
-        print(f"✅ Processed {processed_count} videos")
+            return jsonify({'status': 'error', 'message': 'No videos processed'}), 400
         
         print("🔍 Verifying news...")
         all_headlines = []
-        for source_name, source_url in NEWS_SOURCES.items():
-            headlines = scrape_news_headlines(source_url, source_name)
+        for name, url in NEWS_SOURCES.items():
+            headlines = scrape_news_headlines(url, name)
             all_headlines.extend(headlines)
-            print(f"   📰 {source_name}: {len(headlines)} headlines")
+            print(f"   📰 {name}: {len(headlines)} headlines")
         
-        time.sleep(5)  # Rate limit protection
-        
+        time.sleep(2)
         verification = verify_news_with_gemini(all_summaries, all_headlines)
-        
         cred_match = re.search(r'CREDIBILITY[:\s]*(\d+)%', verification)
         credibility = cred_match.group(1) + '%' if cred_match else 'N/A'
         
-        print(f"📊 Credibility: {credibility}")
-        
-        time.sleep(5)  # Rate limit protection
-        
-        print(f"🎬 Generating {num_scripts} LONG viral scripts with Gemini...")
-        
+        time.sleep(2)
+        print(f"🎬 Generating {num_scripts} scripts...")
         raw_scripts = create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification)
         parsed = parse_scripts(raw_scripts, num_scripts)
         
-        print(f"✅ Generated {len(parsed)} scripts")
-        for s in parsed:
-            print(f"   Script {s['number']}: {s['word_count']} words - {s['title']}")
-        
-        print("📤 Uploading to Google Sheets...")
-        
+        print("📤 Uploading to Sheets...")
         sheet_url = upload_to_sheets(parsed, processed_count, credibility)
-        
-        print(f"✅ Uploaded to: {sheet_url}")
         
         return jsonify({
             'status': 'success',
-            'message': 'Scripts generated successfully with Gemini 1.5 Flash!',
+            'message': 'Scripts generated!',
             'data': {
                 'videos_processed': processed_count,
                 'scripts_generated': len(parsed),
                 'sheet_url': sheet_url,
                 'credibility': credibility,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'model_used': 'Gemini 1.5 Flash (Stable)',
-                'scripts': [
-                    {
-                        'number': s['number'],
-                        'title': s['title'],
-                        'theme': s['theme'],
-                        'word_count': s['word_count'],
-                        'content_preview': s['content'][:200] + '...' if len(s['content']) > 200 else s['content']
-                    } for s in parsed
-                ]
+                'scripts': [{'number': s['number'], 'title': s['title'], 'word_count': s['word_count']} for s in parsed]
             }
         }), 200
         
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 7860))
