@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import yt_dlp
-from faster_whisper import WhisperModel
+import assemblyai as aai
 import os
 import requests
 from bs4 import BeautifulSoup
@@ -17,13 +16,12 @@ CORS(app)
 
 # ========== CONFIGURATION ==========
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
 
-# Load Whisper model once at startup
-print("🔄 Loading Faster-Whisper model...")
-WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
-print("✅ Whisper model loaded")
+# Configure AssemblyAI
+aai.settings.api_key = ASSEMBLYAI_API_KEY
 
 NEWS_SOURCES = {
     "Lokmat Maharashtra": "https://www.lokmat.com/maharashtra/",
@@ -36,64 +34,32 @@ def extract_video_id(url):
     match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
     return match.group(1) if match else None
 
-def download_video_audio(video_id):
-    """Download only audio from YouTube video temporarily"""
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-    output_path = f'/tmp/{video_id}'
-    
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_path + '.%(ext)s',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '64',
-        }],
-        'quiet': True,
-        'no_warnings': True,
-        'socket_timeout': 30,
-    }
-    
+def transcribe_with_assemblyai(video_id):
+    """Transcribe YouTube video using AssemblyAI (bypasses all blocking)"""
     try:
-        print(f"   ⬇️ Downloading audio for {video_id}...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        print(f"   🎙️ Transcribing with AssemblyAI: {video_id}...")
         
-        audio_file = output_path + '.mp3'
-        file_size = os.path.getsize(audio_file) / 1024 / 1024
-        print(f"   ✅ Downloaded: {file_size:.1f} MB")
-        return audio_file
-        
-    except Exception as e:
-        print(f"   ❌ Download failed: {str(e)}")
-        return None
-
-def transcribe_with_whisper(audio_file):
-    """Transcribe using faster-whisper"""
-    try:
-        print(f"   🎙️ Transcribing with Faster-Whisper...")
-        
-        segments, info = WHISPER_MODEL.transcribe(
-            audio_file,
-            language='hi',
-            beam_size=5
+        # Configure for Hindi audio
+        config = aai.TranscriptionConfig(
+            language_code="hi",
+            speech_model=aai.SpeechModel.best
         )
         
-        transcript = ' '.join([segment.text for segment in segments])
+        transcriber = aai.Transcriber(config=config)
+        transcript = transcriber.transcribe(youtube_url)
         
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
-            print(f"   🗑️ Deleted temp file")
+        # Wait for completion
+        if transcript.status == aai.TranscriptStatus.error:
+            raise Exception(transcript.error)
         
-        transcript = transcript.strip()
-        print(f"   ✅ Transcribed: {len(transcript)} chars")
+        transcript_text = transcript.text.strip()
+        print(f"   ✅ Transcribed: {len(transcript_text)} chars")
         
-        return transcript, 'hi'
+        return transcript_text, 'hi'
         
     except Exception as e:
-        print(f"   ❌ Transcription failed: {str(e)}")
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
+        print(f"   ❌ AssemblyAI failed: {str(e)}")
         return None, None
 
 def call_perplexity_api(prompt, max_tokens=2500):
@@ -125,7 +91,7 @@ def call_perplexity_api(prompt, max_tokens=2500):
             "stream": False
         }
         
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response = requests.post(url, json=payload, headers=headers, timeout=90)
         response.raise_for_status()
         
         return response.json()['choices'][0]['message']['content']
@@ -167,6 +133,7 @@ Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/H
         
     except Exception as e:
         print(f"   ⚠️ Summary failed: {str(e)}")
+        # Fallback: simple sentence extraction
         sentences = [s.strip() for s in transcript.replace('!', '.').replace('?', '.').split('.') if len(s.strip()) > 30]
         return '\n'.join(sentences[:15])
 
@@ -373,53 +340,95 @@ def upload_to_sheets(scripts, video_count, credibility):
     except Exception as e:
         raise Exception(f"Sheet upload error: {str(e)}")
 
+# ========== API ENDPOINTS ==========
+
 @app.route('/', methods=['GET'])
 def home():
+    """Health check endpoint"""
     return jsonify({
         'status': 'online',
         'service': 'Instagram Reels Script Generator API',
-        'version': '5.0.0 - FREE Pipeline',
+        'version': '6.0.0 - AssemblyAI + Perplexity Pipeline',
+        'endpoints': {
+            'POST /generate': 'Generate viral scripts from YouTube videos',
+            'GET /health': 'Check API health'
+        },
         'pipeline': {
-            'download': 'yt-dlp',
-            'transcription': 'faster-whisper (base model)',
-            'ai_processing': 'Perplexity Sonar Pro API',
-            'storage': 'Google Sheets'
+            'transcription': 'AssemblyAI (5 hours FREE/month)',
+            'ai_processing': 'Perplexity Sonar Pro API ($5 credit/month)',
+            'storage': 'Google Sheets (FREE)'
         }
     }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
+    """Health check"""
+    has_perplexity = bool(PERPLEXITY_API_KEY)
+    has_assemblyai = bool(ASSEMBLYAI_API_KEY)
+    has_google = bool(GOOGLE_CREDS_JSON)
+    
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'config': {
-            'perplexity_api_configured': bool(PERPLEXITY_API_KEY),
-            'google_sheets_configured': bool(GOOGLE_CREDS_JSON),
-            'whisper_model': 'faster-whisper base'
+            'perplexity_api_configured': has_perplexity,
+            'assemblyai_api_configured': has_assemblyai,
+            'google_sheets_configured': has_google,
+            'sheet_name': GOOGLE_SHEET_NAME
         }
     }), 200
 
 @app.route('/generate', methods=['POST'])
 def generate_scripts():
+    """Main endpoint to generate scripts"""
+    
     try:
         if not PERPLEXITY_API_KEY:
-            return jsonify({'status': 'error', 'message': 'PERPLEXITY_API_KEY not configured'}), 500
+            return jsonify({
+                'status': 'error',
+                'message': 'PERPLEXITY_API_KEY not configured. Get it from https://www.perplexity.ai/settings/api'
+            }), 500
+        
+        if not ASSEMBLYAI_API_KEY:
+            return jsonify({
+                'status': 'error',
+                'message': 'ASSEMBLYAI_API_KEY not configured. Get it from https://www.assemblyai.com/dashboard/signup'
+            }), 500
         
         if not GOOGLE_CREDS_JSON:
-            return jsonify({'status': 'error', 'message': 'GOOGLE_CREDS_JSON not configured'}), 500
+            return jsonify({
+                'status': 'error',
+                'message': 'GOOGLE_CREDS_JSON not configured in environment variables'
+            }), 500
         
         data = request.get_json()
+        
         if not data:
-            return jsonify({'status': 'error', 'message': 'No JSON data provided'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'No JSON data provided'
+            }), 400
         
         video_urls = data.get('video_urls', [])
         num_scripts = data.get('num_scripts', 2)
         
-        if not video_urls or not isinstance(video_urls, list):
-            return jsonify({'status': 'error', 'message': 'Invalid video_urls'}), 400
+        if not video_urls or len(video_urls) == 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'Please provide at least 1 video URL'
+            }), 400
+        
+        if not isinstance(video_urls, list):
+            return jsonify({
+                'status': 'error',
+                'message': 'video_urls must be a list'
+            }), 400
         
         if num_scripts < 1 or num_scripts > 5:
-            return jsonify({'status': 'error', 'message': 'num_scripts must be 1-5'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'num_scripts must be between 1 and 5'
+            }), 400
         
         print(f"\n{'='*60}")
         print(f"📥 NEW REQUEST: {len(video_urls)} videos, {num_scripts} scripts")
@@ -431,64 +440,76 @@ def generate_scripts():
         for idx, url in enumerate(video_urls[:5]):
             video_id = extract_video_id(url)
             if not video_id:
+                print(f"⚠️ Invalid URL: {url}")
                 continue
             
             try:
-                print(f"📹 Video {idx+1}/{len(video_urls)}: {video_id}")
+                print(f"📹 Processing video {idx+1}/{len(video_urls)}: {video_id}")
                 
-                audio_file = download_video_audio(video_id)
-                if not audio_file:
-                    continue
-                
-                transcript, lang = transcribe_with_whisper(audio_file)
+                # Transcribe with AssemblyAI
+                transcript, lang = transcribe_with_assemblyai(video_id)
                 if not transcript:
                     continue
                 
+                # Create summary with Perplexity
                 summary = create_ai_summary(transcript, video_id)
                 all_summaries.append(summary)
                 processed_count += 1
                 
-                print(f"✅ Video {idx+1} processed\n")
-                time.sleep(2)
+                print(f"✅ Video {idx+1} processed successfully\n")
+                
+                # Small delay between videos
+                if idx < len(video_urls) - 1:
+                    time.sleep(2)
                 
             except Exception as e:
-                print(f"❌ Error video {idx+1}: {str(e)}\n")
+                print(f"❌ Error processing video {idx+1}: {str(e)}\n")
                 continue
         
         if processed_count == 0:
-            return jsonify({'status': 'error', 'message': 'No videos processed'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'No videos could be processed. Check video URLs and API keys.'
+            }), 400
         
         print(f"✅ Processed {processed_count} videos\n")
-        print("🔍 Verifying news...")
         
+        print("🔍 Verifying news...")
         all_headlines = []
-        for name, url in NEWS_SOURCES.items():
-            headlines = scrape_news_headlines(url, name)
+        for source_name, source_url in NEWS_SOURCES.items():
+            headlines = scrape_news_headlines(source_url, source_name)
             all_headlines.extend(headlines)
-            print(f"   📰 {name}: {len(headlines)} headlines")
+            print(f"   📰 {source_name}: {len(headlines)} headlines")
         
         print()
         time.sleep(1)
         
         verification = verify_news(all_summaries, all_headlines)
+        
         cred_match = re.search(r'CREDIBILITY[:\s]*(\d+)%', verification)
         credibility = cred_match.group(1) + '%' if cred_match else 'N/A'
         
         print(f"📊 Credibility: {credibility}\n")
+        
         time.sleep(1)
         
-        print(f"🎬 Generating {num_scripts} scripts...")
+        print(f"🎬 Generating {num_scripts} LONG viral scripts with Perplexity Sonar Pro...")
+        
         raw_scripts = create_instagram_scripts(all_summaries, num_scripts, verification)
         parsed = parse_scripts(raw_scripts, num_scripts)
         
-        print(f"\n✅ Generated {len(parsed)} scripts")
+        print(f"\n✅ Generated {len(parsed)} scripts:")
         for s in parsed:
             print(f"   Script {s['number']}: {s['word_count']} words - {s['title']}")
         
-        print(f"\n📤 Uploading to Sheets...")
+        print(f"\n📤 Uploading to Google Sheets...")
+        
         sheet_url = upload_to_sheets(parsed, processed_count, credibility)
         
-        print(f"✅ Done: {sheet_url}\n{'='*60}\n")
+        print(f"✅ Uploaded to: {sheet_url}")
+        print(f"\n{'='*60}")
+        print(f"🎉 REQUEST COMPLETED SUCCESSFULLY!")
+        print(f"{'='*60}\n")
         
         return jsonify({
             'status': 'success',
@@ -499,22 +520,31 @@ def generate_scripts():
                 'sheet_url': sheet_url,
                 'credibility': credibility,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'pipeline_used': 'AssemblyAI → Perplexity Sonar Pro → Google Sheets',
                 'scripts': [
                     {
                         'number': s['number'],
                         'title': s['title'],
                         'theme': s['theme'],
                         'word_count': s['word_count'],
-                        'content_preview': s['content'][:200] + '...'
+                        'content_preview': s['content'][:200] + '...' if len(s['content']) > 200 else s['content']
                     } for s in parsed
                 ]
             }
         }), 200
         
     except Exception as e:
-        print(f"\n❌ ERROR: {str(e)}\n")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print(f"\n❌ FATAL ERROR: {str(e)}\n")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 7860))
+    print(f"\n🚀 Starting Instagram Reels Script Generator...")
+    print(f"🎙️ Transcription: AssemblyAI")
+    print(f"🤖 AI Processing: Perplexity Sonar Pro")
+    print(f"📊 Storage: Google Sheets")
+    print(f"🌐 Port: {port}\n")
     app.run(host='0.0.0.0', port=port, debug=False)
