@@ -51,7 +51,7 @@ def get_transcript_with_gemini(video_id, max_retries=3):
             
             # Gemini 1.5 Flash can directly process YouTube URLs!
             response = gemini_client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-1.5-flash-latest',
                 contents=[
                     "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
                     "Include ALL spoken words in the original language (Hindi/Marathi/English). "
@@ -129,7 +129,7 @@ FORMAT:
 Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/Hinglish."""
 
         response = gemini_client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-1.5-flash-latest',
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.3,
@@ -203,7 +203,7 @@ FORMAT:
 EXPLANATION: [Brief explanation of the score]"""
 
         response = gemini_client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-1.5-flash-latest',
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.2,
@@ -266,7 +266,7 @@ WORD COUNT: [Actual word count]
 Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
 
         response = gemini_client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-1.5-flash-latest',
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.95,  # High creativity
