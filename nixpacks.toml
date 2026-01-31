@@ -1,5 +1,6 @@
 [phases.setup]
-nixPkgs = ['ffmpeg']
+nixPkgs = ['python311', 'ffmpeg']
+pythonVersion = '3.11'
 
 [start]
 cmd = 'gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 600 --worker-class sync'
