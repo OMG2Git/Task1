@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from youtube_transcript_api import YouTubeTranscriptApi
-from groq import Groq
+from google import genai
+from google.genai import types
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -12,16 +12,16 @@ from google.oauth2.service_account import Credentials
 import json
 import os
 
-
 app = Flask(__name__)
 CORS(app)
 
-
 # ========== CONFIGURATION ==========
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Get free key from https://aistudio.google.com/
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
-WEBSHARE_PROXY = os.getenv("WEBSHARE_PROXY")
+
+# Initialize Gemini client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 NEWS_SOURCES = {
     "Lokmat Maharashtra": "https://www.lokmat.com/maharashtra/",
@@ -29,91 +29,85 @@ NEWS_SOURCES = {
     "ABP Majha": "https://marathi.abplive.com/"
 }
 
-
 def extract_video_id(url):
     """Extract video ID from YouTube URL"""
     match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
     return match.group(1) if match else None
 
-
-def get_summary(text, max_sentences=8):
-    """Extract key sentences from Hindi news"""
-    sentences = [s.strip() for s in text.replace('!', '.').replace('?', '.').split('.') if len(s.strip()) > 30]
-    keywords = ['सुप्रीम', 'कोर्ट', 'मोदी', 'सरकार', 'बोले', 'कहा', 'नए', 'नियम', 'बीजेपी', 'कांग्रेस', 'यूजीसी', 'पवार']
-    scored = [(s, sum(1 for k in keywords if k in s)) for s in sentences[:60]]
-    
-    seen = set()
-    top = []
-    for s, score in sorted(scored, key=lambda x: (x[1], len(x[0])), reverse=True):
-        if s not in seen and len(top) < max_sentences:
-            top.append(s)
-            seen.add(s)
-    return top
-
-
-def get_transcript_with_retry(video_id, max_retries=3):
-    """Fetch transcript using youtube-transcript-api's BUILT-IN proxy support"""
+def get_transcript_with_gemini(video_id, max_retries=3):
+    """
+    Extract transcript directly from YouTube using Gemini 2.0 Flash
+    FREE TIER: 10 RPM, 250 RPD - Perfect for this use case!
+    """
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
-                time.sleep(2)
+                time.sleep(3)
             
-            from youtube_transcript_api import YouTubeTranscriptApi
-            from youtube_transcript_api.proxies import GenericProxyConfig
+            print(f"   🤖 Using Gemini 2.0 Flash to transcribe {video_id}...")
             
-            if WEBSHARE_PROXY:
-                print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
-                
-                # Use the CORRECT built-in proxy configuration
-                proxy_config = GenericProxyConfig(
-                    http_url=f"http://{WEBSHARE_PROXY}",
-                    https_url=f"http://{WEBSHARE_PROXY}"
+            # Gemini 2.0 Flash can directly process YouTube URLs!
+            response = gemini_client.models.generate_content(
+                model='gemini-2.0-flash-exp',  # FREE model, perfect for transcription
+                contents=[
+                    types.Part.from_text(
+                        "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
+                        "Include ALL spoken words in the original language (Hindi/Marathi/English). "
+                        "Do NOT summarize - provide the FULL transcript exactly as spoken. "
+                        "Format: Just the transcript text, no extra commentary."
+                    ),
+                    types.Part.from_uri(
+                        file_uri=youtube_url,
+                        mime_type="video/youtube"
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,  # Low temperature for accuracy
+                    max_output_tokens=8000
                 )
+            )
+            
+            transcript_text = response.text.strip()
+            
+            if transcript_text and len(transcript_text) > 100:
+                print(f"   ✅ Got transcript: {len(transcript_text)} chars")
                 
-                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+                # Detect language
+                devanagari_count = sum(1 for c in transcript_text[:500] if '\u0900' <= c <= '\u097F')
+                lang = 'hi' if devanagari_count > 20 else 'en'
+                
+                return transcript_text, lang
             else:
-                print(f"   ⚠️ No proxy configured!")
-                ytt_api = YouTubeTranscriptApi()
-            
-            # Try both languages
-            for lang_code in ['hi', 'en']:
-                try:
-                    print(f"   Trying {lang_code}...")
-                    transcript_data = ytt_api.fetch(video_id, languages=[lang_code])
-                    full_text = ' '.join([entry.text for entry in transcript_data])
-                    print(f"   ✅ Got transcript: {len(full_text)} chars in {lang_code}")
-                    return full_text, lang_code
-                    
-                except Exception as e:
-                    print(f"   {lang_code} failed: {str(e)[:100]}")
-                    continue
-            
-            raise Exception("No transcript available")
+                raise Exception("Transcript too short or empty")
             
         except Exception as e:
-            print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
+            error_msg = str(e)
+            print(f"   ❌ Attempt {attempt + 1} failed: {error_msg[:150]}")
+            
+            # Handle rate limits gracefully
+            if '429' in error_msg or 'quota' in error_msg.lower():
+                print(f"   ⏳ Rate limit hit, waiting {10 * (attempt + 1)} seconds...")
+                time.sleep(10 * (attempt + 1))
+            
             if attempt == max_retries - 1:
                 raise e
-            time.sleep(3)
+            time.sleep(5)
             continue
     
     return None, None
 
-
-def create_ai_summary(transcript, video_id, language):
-    """Create AI summary - NO PROXY for Groq"""
+def create_ai_summary_with_gemini(transcript, video_id, language):
+    """
+    Create AI summary using Gemini 2.0 Flash
+    FREE TIER: 10 RPM, 250 RPD - More than enough!
+    """
     try:
-        # Make ABSOLUTELY SURE requests.get is not patched
-        import importlib
-        importlib.reload(requests)
+        truncated = transcript[:15000] if len(transcript) > 15000 else transcript
         
-        # Now create Groq client with clean requests
-        client = Groq(api_key=GROQ_API_KEY)
-        truncated = transcript[:6000] + "..." if len(transcript) > 6000 else transcript
-        
-        prompt = f"""You are a Hindi news summarizer. Extract 8-10 key news stories from this video.
+        prompt = f"""You are a Hindi news summarizer. Extract 8-10 key news stories from this video transcript.
 
 VIDEO ID: {video_id}
 LANGUAGE: {language}
@@ -124,7 +118,7 @@ TRANSCRIPT:
 TASK: Extract ALL important news stories with MAXIMUM details
 
 For each story:
-- Write 3-4 sentences in Hindi
+- Write 3-4 sentences in Hindi/Hinglish
 - Include: what happened, who is involved, key facts (dates, numbers, places, quotes)
 - Add background context if relevant
 - Focus on concrete news (politics, accidents, court cases, schemes, protests, etc.)
@@ -134,29 +128,29 @@ FORMAT:
 [2] Next story - Detailed explanation with numbers, names, places
 [3] Continue...
 
-Write 8-10 stories. Keep total summary under 1200 words. Write in simple Hindi."""
+Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/Hinglish."""
 
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are an expert Hindi news summarizer. Be detailed and comprehensive."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=2000
+        response = gemini_client.models.generate_content(
+            model='gemini-2.0-flash-exp',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=2500
+            )
         )
         
-        summary = completion.choices[0].message.content.strip()
+        summary = response.text.strip()
         print(f"   ✅ AI summary created: {len(summary)} characters")
         return summary
         
     except Exception as e:
         print(f"   ⚠️ AI summary failed: {str(e)}")
-        return '\n'.join(get_summary(transcript, max_sentences=8))
-
+        # Fallback to simple extraction
+        sentences = [s.strip() for s in transcript.replace('!', '.').replace('?', '.').split('.') if len(s.strip()) > 30]
+        return '\n'.join(sentences[:15])
 
 def scrape_news_headlines(url, source_name):
-    """Scrape headlines"""
+    """Scrape headlines from news websites"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
@@ -169,7 +163,7 @@ def scrape_news_headlines(url, source_name):
             elements = soup.find_all(selector, limit=50)
             for elem in elements:
                 text = elem.get_text(strip=True)
-                if len(text) > 20 and len(text) < 200:
+                if 20 < len(text) < 200:
                     headlines.append(text)
         
         return list(set(headlines))[:30]
@@ -177,98 +171,112 @@ def scrape_news_headlines(url, source_name):
         print(f"   ⚠️ Scraping {source_name} failed: {str(e)}")
         return []
 
-
-def verify_news_with_groq(all_summaries, scraped_news):
-    """Verify news - NO PROXY for Groq"""
+def verify_news_with_gemini(all_summaries, scraped_news):
+    """
+    Verify news credibility using Gemini 2.0 Flash
+    FREE TIER: Perfect for this task!
+    """
     try:
-        # Make ABSOLUTELY SURE requests.get is not patched
-        import importlib
-        importlib.reload(requests)
+        video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
+        news_text = '\n'.join(scraped_news[:30])
         
-        # Now create Groq client with clean requests
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:800]}" for i, s in enumerate(all_summaries)])
-        news_text = '\n'.join(scraped_news[:25])
-        
-        prompt = f"""Compare video summaries with current headlines. Provide credibility score.
+        prompt = f"""You are a professional news fact-checker. Compare these video summaries with current headlines and provide a credibility score.
 
 VIDEO SUMMARIES:
-{video_text[:4000]}
+{video_text[:5000]}
 
-CURRENT HEADLINES:
-{news_text[:2000]}
+CURRENT NEWS HEADLINES:
+{news_text[:2500]}
 
-Format:
-✅ VERIFIED: [List]
-⚠️ UNVERIFIED: [List]
-📊 CREDIBILITY: X%"""
+TASK:
+1. Identify which stories from videos are VERIFIED by the headlines
+2. Identify which stories are UNVERIFIED (not found in headlines)
+3. Calculate overall CREDIBILITY score (0-100%)
 
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are a news fact-checker."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=1000
+FORMAT:
+✅ VERIFIED STORIES:
+- [List verified stories]
+
+⚠️ UNVERIFIED STORIES:
+- [List unverified stories]
+
+📊 CREDIBILITY SCORE: X%
+
+EXPLANATION: [Brief explanation of the score]"""
+
+        response = gemini_client.models.generate_content(
+            model='gemini-2.0-flash-exp',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=1500
+            )
         )
         
-        result = completion.choices[0].message.content
+        result = response.text.strip()
         print(f"   ✅ Verification completed")
         return result
         
     except Exception as e:
         print(f"   ⚠️ Verification failed: {str(e)}")
-        return "Verification unavailable"
+        return "Verification unavailable due to API limits"
 
-
-def create_instagram_scripts(all_summaries, num_scripts, verification):
-    """Generate LONG viral scripts - NO PROXY for Groq"""
+def create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification):
+    """
+    Generate viral Instagram scripts using Gemini 2.0 Flash
+    FREE TIER: 10 RPM, 250 RPD - Perfect!
+    """
     try:
-        # Make ABSOLUTELY SURE requests.get is not patched
-        import importlib
-        importlib.reload(requests)
+        combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
         
-        # Now create Groq client with clean requests
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:900]}" for i, s in enumerate(all_summaries)])
-        
-        themes = [
-            "Supreme Court & Political Drama",
-            "Maharashtra Politics & Leaders", 
-            "Economic Growth & Trade Deals",
-            "Social Issues & Public Protests",
-            "Regional News & Controversies"
-        ]
-        
-        prompt = f"""You are India's #1 VIRAL Instagram influencer scriptwriter.
+        prompt = f"""You are India's #1 VIRAL Instagram Reels scriptwriter specializing in Hindi news content.
 
-Create {num_scripts} SUPER LONG, SUPER ENGAGING Reels scripts in HINGLISH.
+Create {num_scripts} SUPER ENGAGING, SUPER LONG Instagram Reels scripts in HINGLISH (55% Hindi + 45% English).
 
-NEWS SUMMARIES: {combined[:5000]}
-VERIFICATION: {verification[:600]}
+NEWS SUMMARIES:
+{combined[:6000]}
 
-⚠️ CRITICAL: Each script MUST be 450-550 WORDS minimum!
-⚠️ Each script must cover 7-9 DIFFERENT stories with FULL details!
+VERIFICATION:
+{verification[:800]}
 
-Generate all {num_scripts} scripts NOW with unique content in each."""
+⚠️ CRITICAL REQUIREMENTS FOR EACH SCRIPT:
+1. LENGTH: 450-550 WORDS minimum (this is MANDATORY!)
+2. STORIES: Cover 7-9 DIFFERENT news stories with FULL details
+3. LANGUAGE: Natural Hinglish (mix Hindi and English fluently)
+4. TONE: Energetic, conversational influencer style
+5. STRUCTURE: 
+   - Strong hook (10-15 seconds)
+   - Story 1 with full details (30-40 seconds)
+   - Story 2 with full details (30-40 seconds)
+   - Continue for 7-9 stories
+   - Powerful ending with CTA
 
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are India's #1 viral Instagram creator. Scripts MUST be 500+ words with 7-9 detailed stories each."
-                },
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.95,
-            max_tokens=6000
+6. INCLUDE: Names, numbers, dates, places, quotes
+7. STYLE: Fast-paced, engaging, viral-worthy
+
+FORMAT FOR EACH SCRIPT:
+═══════════════════════
+SCRIPT [NUMBER]
+═══════════════════════
+TITLE: [Catchy title in Hinglish]
+THEME: [Theme category]
+WORD COUNT: [Actual word count]
+
+[FULL SCRIPT CONTENT - 500+ WORDS]
+═══════════════════════
+
+Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
+
+        response = gemini_client.models.generate_content(
+            model='gemini-2.0-flash-exp',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.95,  # High creativity
+                max_output_tokens=8000
+            )
         )
         
-        result = completion.choices[0].message.content
+        result = response.text.strip()
         print(f"   ✅ Scripts generated: {len(result)} characters")
         return result
         
@@ -277,7 +285,7 @@ Generate all {num_scripts} scripts NOW with unique content in each."""
         return f"Error: {str(e)}"
 
 def parse_scripts(raw_text, num_scripts):
-    """Parse scripts"""
+    """Parse generated scripts"""
     scripts = []
     pattern = r'SCRIPT\s+(\d+)'
     parts = re.split(pattern, raw_text, flags=re.IGNORECASE)
@@ -307,7 +315,6 @@ def parse_scripts(raw_text, num_scripts):
             })
     
     return scripts[:num_scripts]
-
 
 def upload_to_sheets(scripts, video_count, credibility):
     """Upload to Google Sheets"""
@@ -341,7 +348,7 @@ def upload_to_sheets(scripts, video_count, credibility):
                 'Credibility',
                 'Status'
             ]
-            worksheet.update('A1', [headers])
+            worksheet.update('A1:I1', [headers])
             worksheet.format('A1:I1', {
                 'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
                 'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
@@ -377,7 +384,6 @@ def upload_to_sheets(scripts, video_count, credibility):
     except Exception as e:
         raise Exception(f"Sheet upload error: {str(e)}")
 
-
 # ========== API ENDPOINTS ==========
 
 @app.route('/', methods=['GET'])
@@ -385,50 +391,49 @@ def home():
     """Health check endpoint"""
     return jsonify({
         'status': 'online',
-        'service': 'Instagram Reels Script Generator API',
-        'version': '2.0.1',
+        'service': 'Instagram Reels Script Generator API (Gemini-Powered)',
+        'version': '3.0.0',
+        'model': 'Gemini 2.0 Flash (FREE)',
         'endpoints': {
-            'POST /generate': 'Generate long viral scripts from YouTube videos',
+            'POST /generate': 'Generate viral scripts from YouTube videos',
             'GET /health': 'Check API health'
         },
         'features': {
+            'transcript_source': 'Gemini 2.0 Flash (Direct YouTube URL)',
             'script_length': '450-550 words per script',
             'stories_per_script': '7-9 different stories',
             'language': 'Hinglish (55% Hindi + 45% English)',
             'tone': 'Conversational influencer style',
-            'proxy_enabled': bool(WEBSHARE_PROXY)
+            'free_tier_limits': '10 RPM, 250 RPD (Gemini 2.0 Flash)'
         }
     }), 200
-
 
 @app.route('/health', methods=['GET'])
 def health():
     """Health check"""
-    has_groq = bool(GROQ_API_KEY)
+    has_gemini = bool(GEMINI_API_KEY)
     has_google = bool(GOOGLE_CREDS_JSON)
-    has_proxy = bool(WEBSHARE_PROXY)
     
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'config': {
-            'groq_api_configured': has_groq,
+            'gemini_api_configured': has_gemini,
             'google_sheets_configured': has_google,
-            'proxy_configured': has_proxy,
-            'sheet_name': GOOGLE_SHEET_NAME
+            'sheet_name': GOOGLE_SHEET_NAME,
+            'model': 'Gemini 2.0 Flash Experimental (FREE)'
         }
     }), 200
-
 
 @app.route('/generate', methods=['POST'])
 def generate_scripts():
     """Main endpoint to generate scripts"""
     
     try:
-        if not GROQ_API_KEY:
+        if not GEMINI_API_KEY:
             return jsonify({
                 'status': 'error',
-                'message': 'GROQ_API_KEY not configured in environment variables'
+                'message': 'GEMINI_API_KEY not configured. Get free key from https://aistudio.google.com/'
             }), 500
         
         if not GOOGLE_CREDS_JSON:
@@ -466,7 +471,7 @@ def generate_scripts():
                 'message': 'num_scripts must be between 1 and 5'
             }), 400
         
-        print(f"📥 Processing {len(video_urls)} videos...")
+        print(f"📥 Processing {len(video_urls)} videos with Gemini 2.0 Flash...")
         
         all_summaries = []
         processed_count = 0
@@ -480,16 +485,22 @@ def generate_scripts():
             try:
                 print(f"📹 Processing video {idx+1}/{len(video_urls)}: {video_id}")
                 
-                transcript, lang = get_transcript_with_retry(video_id)
+                # Use Gemini to get transcript
+                transcript, lang = get_transcript_with_gemini(video_id)
                 if not transcript:
                     print(f"⚠️ No transcript for {video_id}")
                     continue
                 
-                summary = create_ai_summary(transcript, video_id, lang)
+                # Use Gemini to create summary
+                summary = create_ai_summary_with_gemini(transcript, video_id, lang)
                 all_summaries.append(summary)
                 processed_count += 1
                 
                 print(f"✅ Video {idx+1} processed successfully")
+                
+                # Rate limit protection (FREE tier: 10 RPM)
+                if idx < len(video_urls) - 1:
+                    time.sleep(7)  # Wait 7 seconds between videos
                 
             except Exception as e:
                 print(f"❌ Error processing video {idx+1}: {str(e)}")
@@ -498,7 +509,7 @@ def generate_scripts():
         if processed_count == 0:
             return jsonify({
                 'status': 'error',
-                'message': 'No videos could be processed. Check if videos have captions.'
+                'message': 'No videos could be processed. Check video URLs and API limits.'
             }), 400
         
         print(f"✅ Processed {processed_count} videos")
@@ -510,16 +521,18 @@ def generate_scripts():
             all_headlines.extend(headlines)
             print(f"   📰 {source_name}: {len(headlines)} headlines")
         
-        verification = verify_news_with_groq(all_summaries, all_headlines)
+        verification = verify_news_with_gemini(all_summaries, all_headlines)
         
         cred_match = re.search(r'CREDIBILITY[:\s]*(\d+)%', verification)
         credibility = cred_match.group(1) + '%' if cred_match else 'N/A'
         
         print(f"📊 Credibility: {credibility}")
         
-        print(f"🎬 Generating {num_scripts} LONG viral scripts (450-550 words each)...")
+        time.sleep(7)  # Rate limit protection
         
-        raw_scripts = create_instagram_scripts(all_summaries, num_scripts, verification)
+        print(f"🎬 Generating {num_scripts} LONG viral scripts with Gemini...")
+        
+        raw_scripts = create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification)
         parsed = parse_scripts(raw_scripts, num_scripts)
         
         print(f"✅ Generated {len(parsed)} scripts")
@@ -534,13 +547,14 @@ def generate_scripts():
         
         return jsonify({
             'status': 'success',
-            'message': 'Scripts generated and uploaded successfully',
+            'message': 'Scripts generated successfully with Gemini 2.0 Flash!',
             'data': {
                 'videos_processed': processed_count,
                 'scripts_generated': len(parsed),
                 'sheet_url': sheet_url,
                 'credibility': credibility,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'model_used': 'Gemini 2.0 Flash Experimental (FREE)',
                 'scripts': [
                     {
                         'number': s['number'],
@@ -559,7 +573,6 @@ def generate_scripts():
             'status': 'error',
             'message': str(e)
         }), 500
-
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 7860))
