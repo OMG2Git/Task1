@@ -52,13 +52,7 @@ def get_summary(text, max_sentences=8):
 
 
 def get_transcript_with_retry(video_id, max_retries=3):
-    """Fetch transcript - SIMPLE version using env proxy"""
-    
-    # Set proxy environment variables if WEBSHARE_PROXY is configured
-    if WEBSHARE_PROXY:
-        os.environ['HTTP_PROXY'] = f'http://{WEBSHARE_PROXY}'
-        os.environ['HTTPS_PROXY'] = f'http://{WEBSHARE_PROXY}'
-        print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
+    """Fetch transcript using youtube-transcript-api's BUILT-IN proxy support"""
     
     for attempt in range(max_retries):
         try:
@@ -66,22 +60,30 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
                 time.sleep(2)
             
-            # Just use the library normally - it will use env proxy
             from youtube_transcript_api import YouTubeTranscriptApi
-            ytt_api = YouTubeTranscriptApi()
+            from youtube_transcript_api.proxies import GenericProxyConfig
             
+            if WEBSHARE_PROXY:
+                print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
+                
+                # Use the CORRECT built-in proxy configuration
+                proxy_config = GenericProxyConfig(
+                    http_url=f"http://{WEBSHARE_PROXY}",
+                    https_url=f"http://{WEBSHARE_PROXY}"
+                )
+                
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            else:
+                print(f"   ⚠️ No proxy configured!")
+                ytt_api = YouTubeTranscriptApi()
+            
+            # Try both languages
             for lang_code in ['hi', 'en']:
                 try:
                     print(f"   Trying {lang_code}...")
                     transcript_data = ytt_api.fetch(video_id, languages=[lang_code])
                     full_text = ' '.join([entry.text for entry in transcript_data])
                     print(f"   ✅ Got transcript: {len(full_text)} chars in {lang_code}")
-                    
-                    # Clear proxy env vars after success
-                    if WEBSHARE_PROXY:
-                        os.environ.pop('HTTP_PROXY', None)
-                        os.environ.pop('HTTPS_PROXY', None)
-                    
                     return full_text, lang_code
                     
                 except Exception as e:
@@ -93,18 +95,9 @@ def get_transcript_with_retry(video_id, max_retries=3):
         except Exception as e:
             print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
             if attempt == max_retries - 1:
-                # Clear proxy env vars before raising
-                if WEBSHARE_PROXY:
-                    os.environ.pop('HTTP_PROXY', None)
-                    os.environ.pop('HTTPS_PROXY', None)
                 raise e
             time.sleep(3)
             continue
-    
-    # Clear proxy env vars before returning
-    if WEBSHARE_PROXY:
-        os.environ.pop('HTTP_PROXY', None)
-        os.environ.pop('HTTPS_PROXY', None)
     
     return None, None
 
