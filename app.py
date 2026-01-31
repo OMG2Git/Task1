@@ -1,9 +1,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from youtube_transcript_api import YouTubeTranscriptApi
-from google import genai
-from google.genai.types import GenerateContentConfig
-import re
+import yt_dlp
+import whisper
+import os
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -11,18 +10,21 @@ import time
 import gspread
 from google.oauth2.service_account import Credentials
 import json
-import os
+import re
+import torch
 
 app = Flask(__name__)
 CORS(app)
 
 # ========== CONFIGURATION ==========
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
 
-# Initialize Gemini client
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# Load Whisper model once at startup (memory efficient)
+print("🔄 Loading Whisper model...")
+WHISPER_MODEL = whisper.load_model("base")  # base = faster, still good accuracy
+print("✅ Whisper model loaded")
 
 NEWS_SOURCES = {
     "Lokmat Maharashtra": "https://www.lokmat.com/maharashtra/",
@@ -35,54 +37,112 @@ def extract_video_id(url):
     match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
     return match.group(1) if match else None
 
-def get_transcript_simple(video_id, max_retries=3):
-    """
-    Get transcript using youtube-transcript-api (NO PROXY)
-    Railway US servers should not be blocked by YouTube
-    """
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
-                time.sleep(2)
-            
-            print(f"   📝 Fetching transcript for {video_id}...")
-            
-            # Try both Hindi and English
-            for lang_code in ['hi', 'mr', 'en']:
-                try:
-                    print(f"   Trying {lang_code}...")
-                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang_code])
-                    transcript_text = ' '.join([entry['text'] for entry in transcript_list])
-                    
-                    if len(transcript_text) > 100:
-                        print(f"   ✅ Got transcript: {len(transcript_text)} chars in {lang_code}")
-                        return transcript_text, lang_code
-                        
-                except Exception as e:
-                    print(f"   {lang_code} failed: {str(e)[:100]}")
-                    continue
-            
-            raise Exception("No transcript available in any language")
-            
-        except Exception as e:
-            print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
-            if attempt == max_retries - 1:
-                raise e
-            time.sleep(3)
-            continue
+def download_video_audio(video_id):
+    """Download only audio from YouTube video temporarily"""
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    output_path = f'/tmp/{video_id}'
     
-    return None, None
-
-def create_ai_summary_with_gemini(transcript, video_id, language):
-    """Create AI summary using Gemini 1.5 Flash"""
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_path + '.%(ext)s',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '64',  # Low quality = smaller, faster
+        }],
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 30,
+    }
+    
     try:
-        truncated = transcript[:15000] if len(transcript) > 15000 else transcript
+        print(f"   ⬇️ Downloading audio for {video_id}...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+        
+        audio_file = output_path + '.mp3'
+        file_size = os.path.getsize(audio_file) / 1024 / 1024
+        print(f"   ✅ Downloaded: {file_size:.1f} MB")
+        return audio_file
+        
+    except Exception as e:
+        print(f"   ❌ Download failed: {str(e)}")
+        return None
+
+def transcribe_with_whisper(audio_file):
+    """Transcribe using FREE local Whisper model"""
+    try:
+        print(f"   🎙️ Transcribing with Whisper...")
+        
+        # Transcribe with Hindi language hint
+        result = WHISPER_MODEL.transcribe(
+            audio_file, 
+            language='hi',
+            fp16=False  # CPU compatible
+        )
+        
+        # Clean up file immediately
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+            print(f"   🗑️ Deleted temp file")
+        
+        transcript = result['text'].strip()
+        print(f"   ✅ Transcribed: {len(transcript)} chars")
+        
+        return transcript, 'hi'
+        
+    except Exception as e:
+        print(f"   ❌ Transcription failed: {str(e)}")
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+        return None, None
+
+def call_perplexity_api(prompt, max_tokens=2500):
+    """Call Perplexity Sonar API"""
+    try:
+        url = "https://api.perplexity.ai/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "sonar-pro",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an expert Hindi news content creator specializing in viral Instagram Reels scripts."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "return_citations": False,
+            "stream": False
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        
+        return response.json()['choices'][0]['message']['content']
+        
+    except Exception as e:
+        print(f"   ⚠️ Perplexity API error: {str(e)}")
+        raise e
+
+def create_ai_summary(transcript, video_id):
+    """Create AI summary using Perplexity Sonar API"""
+    try:
+        truncated = transcript[:12000] if len(transcript) > 12000 else transcript
         
         prompt = f"""You are a Hindi news summarizer. Extract 8-10 key news stories from this video transcript.
 
 VIDEO ID: {video_id}
-LANGUAGE: {language}
 
 TRANSCRIPT:
 {truncated}
@@ -102,28 +162,22 @@ FORMAT:
 
 Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/Hinglish."""
 
-        response = gemini_client.models.generate_content(
-            model='gemini-1.5-flash-latest',
-            contents=prompt,
-            config=GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=2500
-            )
-        )
-        
-        summary = response.text.strip()
+        summary = call_perplexity_api(prompt, max_tokens=2500)
         print(f"   ✅ AI summary created: {len(summary)} characters")
         return summary
         
     except Exception as e:
-        print(f"   ⚠️ AI summary failed: {str(e)}")
+        print(f"   ⚠️ Summary failed: {str(e)}")
+        # Fallback: simple sentence extraction
         sentences = [s.strip() for s in transcript.replace('!', '.').replace('?', '.').split('.') if len(s.strip()) > 30]
         return '\n'.join(sentences[:15])
 
 def scrape_news_headlines(url, source_name):
     """Scrape headlines from news websites"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
@@ -137,24 +191,26 @@ def scrape_news_headlines(url, source_name):
                 if 20 < len(text) < 200:
                     headlines.append(text)
         
-        return list(set(headlines))[:30]
+        unique_headlines = list(set(headlines))[:30]
+        return unique_headlines
+        
     except Exception as e:
         print(f"   ⚠️ Scraping {source_name} failed: {str(e)}")
         return []
 
-def verify_news_with_gemini(all_summaries, scraped_news):
-    """Verify news credibility using Gemini 1.5 Flash"""
+def verify_news(all_summaries, scraped_news):
+    """Verify news credibility using Perplexity Sonar API"""
     try:
-        video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
+        video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:800]}" for i, s in enumerate(all_summaries)])
         news_text = '\n'.join(scraped_news[:30])
         
         prompt = f"""You are a professional news fact-checker. Compare these video summaries with current headlines and provide a credibility score.
 
 VIDEO SUMMARIES:
-{video_text[:5000]}
+{video_text[:4000]}
 
 CURRENT NEWS HEADLINES:
-{news_text[:2500]}
+{news_text[:2000]}
 
 TASK:
 1. Identify which stories from videos are VERIFIED by the headlines
@@ -172,16 +228,7 @@ FORMAT:
 
 EXPLANATION: [Brief explanation of the score]"""
 
-        response = gemini_client.models.generate_content(
-            model='gemini-1.5-flash-latest',
-            contents=prompt,
-            config=GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=1500
-            )
-        )
-        
-        result = response.text.strip()
+        result = call_perplexity_api(prompt, max_tokens=1500)
         print(f"   ✅ Verification completed")
         return result
         
@@ -189,20 +236,20 @@ EXPLANATION: [Brief explanation of the score]"""
         print(f"   ⚠️ Verification failed: {str(e)}")
         return "Verification unavailable"
 
-def create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification):
-    """Generate viral Instagram scripts using Gemini 1.5 Flash"""
+def create_instagram_scripts(all_summaries, num_scripts, verification):
+    """Generate viral Instagram scripts using Perplexity Sonar API"""
     try:
-        combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
+        combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:800]}" for i, s in enumerate(all_summaries)])
         
         prompt = f"""You are India's #1 VIRAL Instagram Reels scriptwriter specializing in Hindi news content.
 
 Create {num_scripts} SUPER ENGAGING, SUPER LONG Instagram Reels scripts in HINGLISH (55% Hindi + 45% English).
 
 NEWS SUMMARIES:
-{combined[:6000]}
+{combined[:5000]}
 
 VERIFICATION:
-{verification[:800]}
+{verification[:600]}
 
 ⚠️ CRITICAL REQUIREMENTS FOR EACH SCRIPT:
 1. LENGTH: 450-550 WORDS minimum (this is MANDATORY!)
@@ -232,16 +279,7 @@ WORD COUNT: [Actual word count]
 
 Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
 
-        response = gemini_client.models.generate_content(
-            model='gemini-1.5-flash-latest',
-            contents=prompt,
-            config=GenerateContentConfig(
-                temperature=0.95,
-                max_output_tokens=8000
-            )
-        )
-        
-        result = response.text.strip()
+        result = call_perplexity_api(prompt, max_tokens=8000)
         print(f"   ✅ Scripts generated: {len(result)} characters")
         return result
         
@@ -297,6 +335,7 @@ def upload_to_sheets(scripts, video_count, credibility):
             spreadsheet = client.open(GOOGLE_SHEET_NAME)
         except:
             spreadsheet = client.create(GOOGLE_SHEET_NAME)
+            spreadsheet.share('', perm_type='anyone', role='reader')
         
         try:
             worksheet = spreadsheet.worksheet("Scripts")
@@ -336,45 +375,94 @@ def upload_to_sheets(scripts, video_count, credibility):
     except Exception as e:
         raise Exception(f"Sheet upload error: {str(e)}")
 
+# ========== API ENDPOINTS ==========
+
 @app.route('/', methods=['GET'])
 def home():
+    """Health check endpoint"""
     return jsonify({
         'status': 'online',
-        'service': 'Instagram Reels Script Generator',
-        'version': '4.0.0',
-        'transcript': 'youtube-transcript-api (no proxy)',
-        'ai': 'Gemini 1.5 Flash (text processing only)'
+        'service': 'Instagram Reels Script Generator API',
+        'version': '5.0.0 - FREE Pipeline',
+        'endpoints': {
+            'POST /generate': 'Generate viral scripts from YouTube videos',
+            'GET /health': 'Check API health'
+        },
+        'pipeline': {
+            'download': 'yt-dlp (FREE)',
+            'transcription': 'Whisper base model (FREE, local)',
+            'ai_processing': 'Perplexity Sonar Pro API ($5 credit/month)',
+            'storage': 'Google Sheets (FREE)'
+        }
     }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
+    """Health check"""
+    has_perplexity = bool(PERPLEXITY_API_KEY)
+    has_google = bool(GOOGLE_CREDS_JSON)
+    
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'gemini_configured': bool(GEMINI_API_KEY),
-        'sheets_configured': bool(GOOGLE_CREDS_JSON)
+        'config': {
+            'perplexity_api_configured': has_perplexity,
+            'google_sheets_configured': has_google,
+            'sheet_name': GOOGLE_SHEET_NAME,
+            'whisper_model': 'base (loaded)',
+            'device': 'CPU'
+        }
     }), 200
 
 @app.route('/generate', methods=['POST'])
 def generate_scripts():
+    """Main endpoint to generate scripts"""
+    
     try:
-        if not GEMINI_API_KEY or not GOOGLE_CREDS_JSON:
-            return jsonify({'status': 'error', 'message': 'Missing API keys'}), 500
+        if not PERPLEXITY_API_KEY:
+            return jsonify({
+                'status': 'error',
+                'message': 'PERPLEXITY_API_KEY not configured. Get it from Settings → API in Perplexity Pro'
+            }), 500
+        
+        if not GOOGLE_CREDS_JSON:
+            return jsonify({
+                'status': 'error',
+                'message': 'GOOGLE_CREDS_JSON not configured in environment variables'
+            }), 500
         
         data = request.get_json()
+        
         if not data:
-            return jsonify({'status': 'error', 'message': 'No JSON data'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'No JSON data provided'
+            }), 400
         
         video_urls = data.get('video_urls', [])
         num_scripts = data.get('num_scripts', 2)
         
-        if not video_urls or not isinstance(video_urls, list):
-            return jsonify({'status': 'error', 'message': 'Invalid video_urls'}), 400
+        if not video_urls or len(video_urls) == 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'Please provide at least 1 video URL'
+            }), 400
+        
+        if not isinstance(video_urls, list):
+            return jsonify({
+                'status': 'error',
+                'message': 'video_urls must be a list'
+            }), 400
         
         if num_scripts < 1 or num_scripts > 5:
-            return jsonify({'status': 'error', 'message': 'num_scripts must be 1-5'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'num_scripts must be between 1 and 5'
+            }), 400
         
-        print(f"📥 Processing {len(video_urls)} videos...")
+        print(f"\n{'='*60}")
+        print(f"📥 NEW REQUEST: {len(video_urls)} videos, {num_scripts} scripts")
+        print(f"{'='*60}\n")
         
         all_summaries = []
         processed_count = 0
@@ -382,64 +470,115 @@ def generate_scripts():
         for idx, url in enumerate(video_urls[:5]):
             video_id = extract_video_id(url)
             if not video_id:
+                print(f"⚠️ Invalid URL: {url}")
                 continue
             
             try:
-                print(f"📹 Video {idx+1}/{len(video_urls)}: {video_id}")
+                print(f"📹 Processing video {idx+1}/{len(video_urls)}: {video_id}")
                 
-                transcript, lang = get_transcript_simple(video_id)
+                # Download audio
+                audio_file = download_video_audio(video_id)
+                if not audio_file:
+                    continue
+                
+                # Transcribe with Whisper
+                transcript, lang = transcribe_with_whisper(audio_file)
                 if not transcript:
                     continue
                 
-                summary = create_ai_summary_with_gemini(transcript, video_id, lang)
+                # Create summary with Perplexity
+                summary = create_ai_summary(transcript, video_id)
                 all_summaries.append(summary)
                 processed_count += 1
                 
-                print(f"✅ Video {idx+1} processed")
-                time.sleep(2)
+                print(f"✅ Video {idx+1} processed successfully\n")
+                
+                # Small delay between videos
+                if idx < len(video_urls) - 1:
+                    time.sleep(2)
                 
             except Exception as e:
-                print(f"❌ Error video {idx+1}: {str(e)}")
+                print(f"❌ Error processing video {idx+1}: {str(e)}\n")
                 continue
         
         if processed_count == 0:
-            return jsonify({'status': 'error', 'message': 'No videos processed'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'No videos could be processed. Check video URLs.'
+            }), 400
+        
+        print(f"✅ Processed {processed_count} videos\n")
         
         print("🔍 Verifying news...")
         all_headlines = []
-        for name, url in NEWS_SOURCES.items():
-            headlines = scrape_news_headlines(url, name)
+        for source_name, source_url in NEWS_SOURCES.items():
+            headlines = scrape_news_headlines(source_url, source_name)
             all_headlines.extend(headlines)
-            print(f"   📰 {name}: {len(headlines)} headlines")
+            print(f"   📰 {source_name}: {len(headlines)} headlines")
         
-        time.sleep(2)
-        verification = verify_news_with_gemini(all_summaries, all_headlines)
+        print()
+        time.sleep(1)
+        
+        verification = verify_news(all_summaries, all_headlines)
+        
         cred_match = re.search(r'CREDIBILITY[:\s]*(\d+)%', verification)
         credibility = cred_match.group(1) + '%' if cred_match else 'N/A'
         
-        time.sleep(2)
-        print(f"🎬 Generating {num_scripts} scripts...")
-        raw_scripts = create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification)
+        print(f"📊 Credibility: {credibility}\n")
+        
+        time.sleep(1)
+        
+        print(f"🎬 Generating {num_scripts} viral scripts with Perplexity Sonar Pro...")
+        
+        raw_scripts = create_instagram_scripts(all_summaries, num_scripts, verification)
         parsed = parse_scripts(raw_scripts, num_scripts)
         
-        print("📤 Uploading to Sheets...")
+        print(f"\n✅ Generated {len(parsed)} scripts:")
+        for s in parsed:
+            print(f"   Script {s['number']}: {s['word_count']} words - {s['title']}")
+        
+        print(f"\n📤 Uploading to Google Sheets...")
+        
         sheet_url = upload_to_sheets(parsed, processed_count, credibility)
+        
+        print(f"✅ Uploaded to: {sheet_url}")
+        print(f"\n{'='*60}")
+        print(f"🎉 REQUEST COMPLETED SUCCESSFULLY!")
+        print(f"{'='*60}\n")
         
         return jsonify({
             'status': 'success',
-            'message': 'Scripts generated!',
+            'message': 'Scripts generated successfully!',
             'data': {
                 'videos_processed': processed_count,
                 'scripts_generated': len(parsed),
                 'sheet_url': sheet_url,
                 'credibility': credibility,
-                'scripts': [{'number': s['number'], 'title': s['title'], 'word_count': s['word_count']} for s in parsed]
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'pipeline_used': 'yt-dlp → Whisper → Perplexity Sonar Pro',
+                'scripts': [
+                    {
+                        'number': s['number'],
+                        'title': s['title'],
+                        'theme': s['theme'],
+                        'word_count': s['word_count'],
+                        'content_preview': s['content'][:200] + '...' if len(s['content']) > 200 else s['content']
+                    } for s in parsed
+                ]
             }
         }), 200
         
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print(f"\n❌ FATAL ERROR: {str(e)}\n")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 7860))
+    print(f"\n🚀 Starting server on port {port}...")
+    print(f"🎙️ Whisper model: base (loaded)")
+    print(f"🤖 AI Provider: Perplexity Sonar Pro")
+    print(f"📊 Storage: Google Sheets\n")
     app.run(host='0.0.0.0', port=port, debug=False)
