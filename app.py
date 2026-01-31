@@ -60,6 +60,9 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
                 time.sleep(2)
             
+            # Store original BEFORE any patching
+            original_get = requests.get
+            
             # Create YouTubeTranscriptApi instance
             ytt_api = YouTubeTranscriptApi()
             
@@ -74,8 +77,6 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 }
                 
                 # Monkey-patch requests to use proxy
-                original_get = requests.get
-                
                 def proxied_get(url, **kwargs):
                     kwargs['proxies'] = proxies
                     kwargs['timeout'] = 30
@@ -86,37 +87,40 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 print(f"   ⚠️ No proxy configured - will likely fail!")
             
             # Try to fetch transcript
-            for lang in ['hi', 'en']:
+            transcript_found = False
+            full_text = None
+            lang = None
+            
+            for lang_code in ['hi', 'en']:
                 try:
-                    print(f"   Trying {lang}...")
-                    transcript_data = ytt_api.fetch(video_id, languages=[lang])
+                    print(f"   Trying {lang_code}...")
+                    transcript_data = ytt_api.fetch(video_id, languages=[lang_code])
                     full_text = ' '.join([entry.text for entry in transcript_data])
+                    lang = lang_code
+                    transcript_found = True
                     print(f"   ✅ Got transcript: {len(full_text)} chars in {lang}")
-                    
-                    # Restore original requests.get
-                    if WEBSHARE_PROXY:
-                        requests.get = original_get
-                    
-                    return full_text, lang
+                    break
                 except Exception as e:
-                    print(f"   {lang} failed: {str(e)[:100]}")
+                    print(f"   {lang_code} failed: {str(e)[:100]}")
                     continue
             
-            # Restore original requests.get
-            if WEBSHARE_PROXY:
-                requests.get = original_get
+            # ALWAYS restore original requests.get IMMEDIATELY
+            requests.get = original_get
             
-            raise Exception("No transcript available in Hindi or English")
+            if transcript_found:
+                return full_text, lang
+            else:
+                raise Exception("No transcript available in Hindi or English")
             
         except Exception as e:
+            # Make SURE to restore even on exception
+            try:
+                requests.get = original_get
+            except:
+                pass
+            
             print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
             if attempt == max_retries - 1:
-                # Restore original requests.get before raising
-                if WEBSHARE_PROXY:
-                    try:
-                        requests.get = original_get
-                    except:
-                        pass
                 raise e
             continue
     
@@ -126,7 +130,11 @@ def get_transcript_with_retry(video_id, max_retries=3):
 def create_ai_summary(transcript, video_id, language):
     """Create AI summary - NO PROXY for Groq"""
     try:
-        # Groq doesn't need or support proxy
+        # Make ABSOLUTELY SURE requests.get is not patched
+        import importlib
+        importlib.reload(requests)
+        
+        # Now create Groq client with clean requests
         client = Groq(api_key=GROQ_API_KEY)
         truncated = transcript[:6000] + "..." if len(transcript) > 6000 else transcript
         
@@ -198,7 +206,11 @@ def scrape_news_headlines(url, source_name):
 def verify_news_with_groq(all_summaries, scraped_news):
     """Verify news - NO PROXY for Groq"""
     try:
-        # Groq doesn't need proxy
+        # Make ABSOLUTELY SURE requests.get is not patched
+        import importlib
+        importlib.reload(requests)
+        
+        # Now create Groq client with clean requests
         client = Groq(api_key=GROQ_API_KEY)
         
         video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:800]}" for i, s in enumerate(all_summaries)])
@@ -239,7 +251,11 @@ Format:
 def create_instagram_scripts(all_summaries, num_scripts, verification):
     """Generate LONG viral scripts - NO PROXY for Groq"""
     try:
-        # Groq doesn't need proxy
+        # Make ABSOLUTELY SURE requests.get is not patched
+        import importlib
+        importlib.reload(requests)
+        
+        # Now create Groq client with clean requests
         client = Groq(api_key=GROQ_API_KEY)
         
         combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:900]}" for i, s in enumerate(all_summaries)])
@@ -252,103 +268,24 @@ def create_instagram_scripts(all_summaries, num_scripts, verification):
             "Regional News & Controversies"
         ]
         
-        prompt = f"""You are India's #1 VIRAL Instagram influencer scriptwriter. Your scripts get MILLIONS of views!
+        prompt = f"""You are India's #1 VIRAL Instagram influencer scriptwriter.
 
 Create {num_scripts} SUPER LONG, SUPER ENGAGING Reels scripts in HINGLISH.
 
-NEWS SUMMARIES (Multiple videos):
-{combined[:5000]}
-
+NEWS SUMMARIES: {combined[:5000]}
 VERIFICATION: {verification[:600]}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ CRITICAL REQUIREMENTS - READ VERY CAREFULLY!
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ CRITICAL: Each script MUST be 450-550 WORDS minimum!
+⚠️ Each script must cover 7-9 DIFFERENT stories with FULL details!
 
-📏 LENGTH: MINIMUM 450-550 WORDS PER SCRIPT (120-140 seconds reading time)
-   ⚠️ THIS IS ABSOLUTELY NON-NEGOTIABLE!
-   ⚠️ Scripts under 450 words will be REJECTED!
-   ⚠️ Aim for 500+ words per script!
-
-🎨 EACH SCRIPT = COMPLETELY DIFFERENT STORIES:
-   Script 1: {themes[0]}
-   Script 2: {themes[1] if len(themes) > 1 else 'Regional updates'}
-   Script 3: {themes[2] if len(themes) > 2 else 'Economic news'}
-   Script 4: {themes[3] if len(themes) > 3 else 'Social issues'}  
-   Script 5: {themes[4] if len(themes) > 4 else 'Controversies'}
-
-   ⚠️ ZERO OVERLAP between scripts!
-   ⚠️ Each script must cover 7-9 DIFFERENT news stories
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 MANDATORY STRUCTURE (FOLLOW EXACTLY!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔥 HOOK SECTION (90-110 words):
-   - Line 1-2: SHOCKING statement/question that stops scrolling
-   - Examples: "Guys rukk jao! Aaj India mein itna bada dhamaka hua hai ki..." 
-              "Doston ye sunke tumhara dimaag hil jayega! Aaj..."
-   - Line 3-5: Build MASSIVE curiosity with 3-4 teasers
-   - Line 6-7: Promise value: "Ye sab detail mein bataunga, bas last tak suno!"
-   - Use 5-6 emojis
-   - End with: "Chaliye shuru karte hain! 🚀"
-
-📰 MAIN CONTENT (300-360 words):
-   
-   ⚠️ COVER 7-9 DIFFERENT STORIES - This is where you add MASSIVE length!
-   
-   Each story = 40-50 words (NOT 20-30!)
-   
-   STORY FORMAT (Follow for each):
-   - Story intro: "Pehli/Dusri/Tisri baat..." "Aur suno ek aur badi khabar..."
-   - Main point with SPECIFIC details (WHO, WHAT, WHERE, WHEN, HOW MUCH)
-   - Add CONTEXT: "Pehle kya tha, ab kya ho gaya"
-   - Add IMPACT: "Is decision se kaun benefit hoga, kya change hoga"
-   - Personal reaction: "Ye toh bohot badi baat hai yaar!", "Kaafi controversial hai na?"
-   - Transition: "Par wait, ek aur twist hai...", "Aur ab suno next story..."
-   
-   Include SPECIFIC NUMBERS & NAMES in EVERY story:
-   - "₹827 करोड़ की योजना", "15 लोगों की मौत", "7.2% GDP growth"
-   - "Nirmala Sitharaman ne kaha", "Amit Shah ने visit की"
-   
-   Use 10-12 emojis throughout
-
-💥 OUTRO SECTION (70-90 words):
-   - Quick recap of TOP 3 headlines
-   - Ask engaging question
-   - STRONG call-to-action
-   - Use 4-5 emojis
-
-📋 OUTPUT FORMAT (EXACT):
-
-════════════════════════════════════════════════════════
-SCRIPT 1
-TITLE: [Catchy 4-6 word English title]
-THEME: {themes[0]}
-WORD COUNT: [Must show 450-550]
-════════════════════════════════════════════════════════
-
-[COMPLETE 450-550 WORD SCRIPT IN HINGLISH]
-
-════════════════════════════════════════════════════════
-SCRIPT 2
-TITLE: [Different catchy title]
-THEME: {themes[1] if len(themes) > 1 else 'Regional News'}
-WORD COUNT: [Must show 450-550]
-════════════════════════════════════════════════════════
-
-[COMPLETELY DIFFERENT 450-550 WORD SCRIPT]
-
-... Continue for ALL {num_scripts} scripts
-
-NOW GENERATE ALL {num_scripts} COMPLETE SCRIPTS:"""
+Generate all {num_scripts} scripts NOW with unique content in each."""
 
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are India's #1 viral Instagram Reels creator. Your scripts get MILLIONS of views because they're LONG (500+ words), DETAILED, EMOTIONAL, and ENGAGING. Each script MUST be 450-550 words minimum with 7-9 detailed stories."
+                    "content": "You are India's #1 viral Instagram creator. Scripts MUST be 500+ words with 7-9 detailed stories each."
                 },
                 {"role": "user", "content": prompt}
             ],
@@ -363,7 +300,6 @@ NOW GENERATE ALL {num_scripts} COMPLETE SCRIPTS:"""
     except Exception as e:
         print(f"   ⚠️ Script generation failed: {str(e)}")
         return f"Error: {str(e)}"
-
 
 def parse_scripts(raw_text, num_scripts):
     """Parse scripts"""
