@@ -175,101 +175,43 @@ def create_instagram_scripts(all_summaries, num_scripts, verification):
     try:
         combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:800]}" for i, s in enumerate(all_summaries)])
         
-        prompt = f"""You are India's top VIRAL Instagram Reels scriptwriter for Hindi news content.
-Write in natural Hinglish (around 60% Hindi, 40% English), like a high-energy news influencer talking directly to followers.
+        prompt = f"""You are India's #1 VIRAL Instagram Reels scriptwriter specializing in Hindi news content.
 
-You will create {num_scripts} different Instagram Reels scripts based on these news stories.
+Create {num_scripts} SUPER ENGAGING, SUPER LONG Instagram Reels scripts in HINGLISH (55% Hindi + 45% English).
 
-NEWS MATERIAL:
+NEWS SUMMARIES:
 {combined[:5000]}
 
-VERIFICATION CONTEXT:
+VERIFICATION:
 {verification[:600]}
 
-═══════════════════════════════════════════════════════════
-STRICT OUTPUT FORMAT RULES (VERY IMPORTANT):
-═══════════════════════════════════════════════════════════
+⚠️ CRITICAL REQUIREMENTS FOR EACH SCRIPT:
+1. LENGTH: 450-550 WORDS minimum (this is MANDATORY!)
+2. STORIES: Cover 7-9 DIFFERENT news stories with FULL details
+3. LANGUAGE: Natural Hinglish (mix Hindi and English fluently)
+4. TONE: Energetic, conversational influencer style
+5. STRUCTURE: 
+   - Strong hook (10-15 seconds)
+   - Story 1 with full details (30-40 seconds)
+   - Story 2 with full details (30-40 seconds)
+   - Continue for 7-9 stories
+   - Powerful ending with CTA
 
-1. Each script MUST be ONE continuous monologue - NOT bullets, NOT numbered lists, NOT separate headings
-2. Do NOT use "Story 1", "Story 2", "Story 3" labels or bullet points (-, •, numbers)
-3. Do NOT include citation markers like [1], [2], [3], [4], [5], [6] anywhere in the script
-4. Do NOT use section labels like "Hook:", "Opening:", "Story:", "Conclusion:", "CTA:"
-5. Write as pure spoken text that flows naturally from start to finish
-6. Structure it as continuous paragraphs with smooth transitions between topics
+6. INCLUDE: Names, numbers, dates, places, quotes
+7. STYLE: Fast-paced, engaging, viral-worthy
 
-═══════════════════════════════════════════════════════════
-CONTENT & TONE REQUIREMENTS:
-═══════════════════════════════════════════════════════════
-
-LENGTH: 450-550 words minimum per script (MANDATORY)
-
-TONE: Talk like a young, energetic news influencer speaking to followers
-- Use phrases like: "dosto", "bhai log", "aap logo ko pata hai", "suno", "dekho", "yaar"
-- Mix emotions: shock, pride, suspense, excitement, patriotism
-- Do NOT sound like a boring news anchor reading headlines
-- Feel like a friend sharing important news with passion
-
-COVERAGE: Include 7-9 different news stories with FULL details:
-- Who is involved (names)
-- What happened (events)
-- When (dates, timings)
-- Where (places, locations)
-- Why (reasons, context)
-- Numbers, quotes, dramatic details
-
-TRANSITIONS: Smoothly connect stories with phrases like:
-- "Ab agli baat suno..."
-- "Lekin story yahin khatam nahi hoti..."
-- "Isse bhi badi news hai..."
-- "Agli news sun ke shock lag jayega..."
-- "Aur ab dekho kya hua..."
-
-EMOJIS: Use casual emojis naturally (🔥🚨🇮🇳😱✨💪🎯) but not after every sentence
-
-═══════════════════════════════════════════════════════════
-SCRIPT STRUCTURE (Don't label these sections, just follow the flow):
-═══════════════════════════════════════════════════════════
-
-OPENING (first 15-20 words): Powerful hook that grabs attention immediately
-- Reference biggest/most shocking news
-- Create curiosity
-- Set energetic vibe
-
-MAIN BODY (350-450 words): Flow through 7-9 stories naturally
-- Give full details for each story
-- Use transitions to move between topics
-- Keep energy high throughout
-- Occasionally remind: "agar video pasand aa rahi hai to like kar dena"
-
-CLOSING (last 30-40 words): Strong emotional finish + call to action
-- Patriotic or empowering statement
-- Ask which story hit them most
-- Clear CTA: "Like karo, share karo, follow karo, comment mein batao"
-
-═══════════════════════════════════════════════════════════
-OUTPUT FORMAT FOR EACH SCRIPT:
-═══════════════════════════════════════════════════════════
-
+FORMAT FOR EACH SCRIPT:
 ═══════════════════════
 SCRIPT [NUMBER]
 ═══════════════════════
-TITLE: [Catchy Hinglish title]
-THEME: [News category]
-WORD COUNT: [Count]
+TITLE: [Catchy title in Hinglish]
+THEME: [Theme category]
+WORD COUNT: [Actual word count]
 
-[CONTINUOUS SCRIPT STARTS HERE - NO LABELS, NO BULLETS, NO CITATIONS]
-
-[Script text flows here naturally as one continuous monologue...]
-
+[FULL SCRIPT CONTENT - 500+ WORDS]
 ═══════════════════════
 
-CRITICAL REMINDERS:
-- Remove ALL [1], [2], [3] type citation numbers from the final script
-- No "Story 1:", "Story 2:" labels - just flowing text
-- Write like you're speaking directly to camera
-- Make it feel authentic and energetic, not scripted
-
-Now create {num_scripts} unique scripts following these exact guidelines."""
+Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
 
         result = call_perplexity_api(prompt, max_tokens=8000)
         print(f"   ✅ Scripts generated: {len(result)} characters")
