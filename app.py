@@ -52,7 +52,7 @@ def get_summary(text, max_sentences=8):
 
 
 def get_transcript_with_retry(video_id, max_retries=3):
-    """Fetch transcript with proxy - ISOLATED from Groq"""
+    """Fetch transcript with Webshare proxy bypass - PROPERLY ISOLATED"""
     
     for attempt in range(max_retries):
         try:
@@ -60,61 +60,59 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
                 time.sleep(2)
             
-            # Build the URL manually and fetch with requests+proxy
+            # Create session with proxy
+            session = requests.Session()
+            
             if WEBSHARE_PROXY:
                 print(f"   ✅ Using Webshare proxy: {WEBSHARE_PROXY.split('@')[1]}")
-                proxies = {
+                session.proxies = {
                     'http': f'http://{WEBSHARE_PROXY}',
                     'https': f'http://{WEBSHARE_PROXY}'
                 }
             else:
                 print(f"   ⚠️ No proxy configured!")
-                proxies = None
             
-            # Try both languages
+            # Patch youtube_transcript_api to use our session
+            from youtube_transcript_api import _api
+            
+            # Store original
+            original_session_get = _api.requests.Session.get if hasattr(_api.requests.Session, 'get') else None
+            
+            # Create custom get that uses our session
+            def custom_get(self, url, **kwargs):
+                return session.get(url, **kwargs)
+            
+            # Apply patch ONLY to youtube_transcript_api's requests
+            _api.requests.Session.get = custom_get
+            
+            # Now fetch transcript
+            ytt_api = YouTubeTranscriptApi()
+            
+            transcript_found = False
+            full_text = None
+            lang = None
+            
             for lang_code in ['hi', 'en']:
                 try:
                     print(f"   Trying {lang_code}...")
-                    
-                    # Manually fetch transcript JSON from YouTube
-                    url = f"https://www.youtube.com/api/timedtext?lang={lang_code}&v={video_id}&fmt=json3"
-                    
-                    response = requests.get(
-                        url,
-                        proxies=proxies,
-                        headers={'User-Agent': 'Mozilla/5.0'},
-                        timeout=30
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        
-                        if 'events' in data:
-                            texts = []
-                            for event in data.get('events', []):
-                                if 'segs' in event:
-                                    for seg in event['segs']:
-                                        if 'utf8' in seg:
-                                            texts.append(seg['utf8'])
-                            
-                            if texts:
-                                full_text = ' '.join(texts)
-                                print(f"   ✅ Got transcript: {len(full_text)} chars in {lang_code}")
-                                return full_text, lang_code
-                    
-                    # Fallback to youtube-transcript-api
-                    from youtube_transcript_api import YouTubeTranscriptApi
-                    ytt_api = YouTubeTranscriptApi()
                     transcript_data = ytt_api.fetch(video_id, languages=[lang_code])
                     full_text = ' '.join([entry.text for entry in transcript_data])
-                    print(f"   ✅ Got transcript: {len(full_text)} chars in {lang_code}")
-                    return full_text, lang_code
-                    
+                    lang = lang_code
+                    transcript_found = True
+                    print(f"   ✅ Got transcript: {len(full_text)} chars in {lang}")
+                    break
                 except Exception as e:
                     print(f"   {lang_code} failed: {str(e)[:100]}")
                     continue
             
-            raise Exception("No transcript available")
+            # Restore original IMMEDIATELY
+            if original_session_get:
+                _api.requests.Session.get = original_session_get
+            
+            if transcript_found:
+                return full_text, lang
+            else:
+                raise Exception("No transcript available")
             
         except Exception as e:
             print(f"   ❌ Attempt {attempt + 1} failed: {str(e)[:150]}")
