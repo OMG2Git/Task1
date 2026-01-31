@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google import genai
-from google.genai.types import GenerateContentConfig, Part, Content
+from google.genai.types import GenerateContentConfig, Part
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -36,8 +36,8 @@ def extract_video_id(url):
 
 def get_transcript_with_gemini(video_id, max_retries=3):
     """
-    Extract transcript directly from YouTube using Gemini 2.0 Flash
-    FREE TIER: 10 RPM, 250 RPD - Perfect for this use case!
+    Extract transcript directly from YouTube using Gemini 1.5 Flash
+    FREE TIER: 15 RPM, 1500 RPD - Perfect for this use case!
     """
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     
@@ -47,11 +47,11 @@ def get_transcript_with_gemini(video_id, max_retries=3):
                 print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
                 time.sleep(3)
             
-            print(f"   🤖 Using Gemini 2.0 Flash to transcribe {video_id}...")
+            print(f"   🤖 Using Gemini 1.5 Flash to transcribe {video_id}...")
             
-            # CORRECTED API call for v1.61.0
+            # Gemini 1.5 Flash can directly process YouTube URLs!
             response = gemini_client.models.generate_content(
-                model='gemini-2.0-flash-exp',
+                model='gemini-1.5-flash',
                 contents=[
                     "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
                     "Include ALL spoken words in the original language (Hindi/Marathi/English). "
@@ -83,7 +83,7 @@ def get_transcript_with_gemini(video_id, max_retries=3):
             
         except Exception as e:
             error_msg = str(e)
-            print(f"   ❌ Attempt {attempt + 1} failed: {error_msg[:150]}")
+            print(f"   ❌ Attempt {attempt + 1} failed: {error_msg[:200]}")
             
             # Handle rate limits gracefully
             if '429' in error_msg or 'quota' in error_msg.lower():
@@ -97,11 +97,10 @@ def get_transcript_with_gemini(video_id, max_retries=3):
     
     return None, None
 
-
 def create_ai_summary_with_gemini(transcript, video_id, language):
     """
-    Create AI summary using Gemini 2.0 Flash
-    FREE TIER: 10 RPM, 250 RPD - More than enough!
+    Create AI summary using Gemini 1.5 Flash
+    FREE TIER: 15 RPM, 1500 RPD - More than enough!
     """
     try:
         truncated = transcript[:15000] if len(transcript) > 15000 else transcript
@@ -130,7 +129,7 @@ FORMAT:
 Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/Hinglish."""
 
         response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model='gemini-1.5-flash',
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.3,
@@ -172,7 +171,7 @@ def scrape_news_headlines(url, source_name):
 
 def verify_news_with_gemini(all_summaries, scraped_news):
     """
-    Verify news credibility using Gemini 2.0 Flash
+    Verify news credibility using Gemini 1.5 Flash
     FREE TIER: Perfect for this task!
     """
     try:
@@ -204,7 +203,7 @@ FORMAT:
 EXPLANATION: [Brief explanation of the score]"""
 
         response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model='gemini-1.5-flash',
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.2,
@@ -222,8 +221,8 @@ EXPLANATION: [Brief explanation of the score]"""
 
 def create_instagram_scripts_with_gemini(all_summaries, num_scripts, verification):
     """
-    Generate viral Instagram scripts using Gemini 2.0 Flash
-    FREE TIER: 10 RPM, 250 RPD - Perfect!
+    Generate viral Instagram scripts using Gemini 1.5 Flash
+    FREE TIER: 15 RPM, 1500 RPD - Perfect!
     """
     try:
         combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:1000]}" for i, s in enumerate(all_summaries)])
@@ -267,7 +266,7 @@ WORD COUNT: [Actual word count]
 Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
 
         response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model='gemini-1.5-flash',
             contents=prompt,
             config=GenerateContentConfig(
                 temperature=0.95,  # High creativity
@@ -391,19 +390,19 @@ def home():
     return jsonify({
         'status': 'online',
         'service': 'Instagram Reels Script Generator API (Gemini-Powered)',
-        'version': '3.0.0',
-        'model': 'Gemini 2.0 Flash Experimental (FREE)',
+        'version': '3.1.0',
+        'model': 'Gemini 1.5 Flash (Stable, FREE)',
         'endpoints': {
             'POST /generate': 'Generate viral scripts from YouTube videos',
             'GET /health': 'Check API health'
         },
         'features': {
-            'transcript_source': 'Gemini 2.0 Flash (Direct YouTube URL)',
+            'transcript_source': 'Gemini 1.5 Flash (Direct YouTube URL)',
             'script_length': '450-550 words per script',
             'stories_per_script': '7-9 different stories',
             'language': 'Hinglish (55% Hindi + 45% English)',
             'tone': 'Conversational influencer style',
-            'free_tier_limits': '10 RPM, 250 RPD (Gemini 2.0 Flash)'
+            'free_tier_limits': '15 RPM, 1500 RPD (Gemini 1.5 Flash)'
         }
     }), 200
 
@@ -420,7 +419,7 @@ def health():
             'gemini_api_configured': has_gemini,
             'google_sheets_configured': has_google,
             'sheet_name': GOOGLE_SHEET_NAME,
-            'model': 'Gemini 2.0 Flash Experimental (FREE)'
+            'model': 'Gemini 1.5 Flash (Stable)'
         }
     }), 200
 
@@ -470,7 +469,7 @@ def generate_scripts():
                 'message': 'num_scripts must be between 1 and 5'
             }), 400
         
-        print(f"📥 Processing {len(video_urls)} videos with Gemini 2.0 Flash...")
+        print(f"📥 Processing {len(video_urls)} videos with Gemini 1.5 Flash...")
         
         all_summaries = []
         processed_count = 0
@@ -497,9 +496,9 @@ def generate_scripts():
                 
                 print(f"✅ Video {idx+1} processed successfully")
                 
-                # Rate limit protection (FREE tier: 10 RPM)
+                # Rate limit protection (FREE tier: 15 RPM)
                 if idx < len(video_urls) - 1:
-                    time.sleep(7)  # Wait 7 seconds between videos
+                    time.sleep(5)  # Wait 5 seconds between videos
                 
             except Exception as e:
                 print(f"❌ Error processing video {idx+1}: {str(e)}")
@@ -520,6 +519,8 @@ def generate_scripts():
             all_headlines.extend(headlines)
             print(f"   📰 {source_name}: {len(headlines)} headlines")
         
+        time.sleep(5)  # Rate limit protection
+        
         verification = verify_news_with_gemini(all_summaries, all_headlines)
         
         cred_match = re.search(r'CREDIBILITY[:\s]*(\d+)%', verification)
@@ -527,7 +528,7 @@ def generate_scripts():
         
         print(f"📊 Credibility: {credibility}")
         
-        time.sleep(7)  # Rate limit protection
+        time.sleep(5)  # Rate limit protection
         
         print(f"🎬 Generating {num_scripts} LONG viral scripts with Gemini...")
         
@@ -546,14 +547,14 @@ def generate_scripts():
         
         return jsonify({
             'status': 'success',
-            'message': 'Scripts generated successfully with Gemini 2.0 Flash!',
+            'message': 'Scripts generated successfully with Gemini 1.5 Flash!',
             'data': {
                 'videos_processed': processed_count,
                 'scripts_generated': len(parsed),
                 'sheet_url': sheet_url,
                 'credibility': credibility,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'model_used': 'Gemini 2.0 Flash Experimental (FREE)',
+                'model_used': 'Gemini 1.5 Flash (Stable)',
                 'scripts': [
                     {
                         'number': s['number'],
