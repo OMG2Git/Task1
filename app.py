@@ -12,13 +12,16 @@ from google.oauth2.service_account import Credentials
 import json
 import os
 
+
 app = Flask(__name__)
 CORS(app)
+
 
 # ========== CONFIGURATION ==========
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
+WEBSHARE_PROXY = os.getenv("WEBSHARE_PROXY")
 
 NEWS_SOURCES = {
     "Lokmat Maharashtra": "https://www.lokmat.com/maharashtra/",
@@ -51,8 +54,6 @@ def get_summary(text, max_sentences=8):
 def get_transcript_with_retry(video_id, max_retries=3):
     """Fetch transcript with Webshare proxy bypass"""
     
-    WEBSHARE_PROXY = os.getenv("WEBSHARE_PROXY")
-    
     for attempt in range(max_retries):
         try:
             if attempt > 0:
@@ -73,7 +74,6 @@ def get_transcript_with_retry(video_id, max_retries=3):
                 }
                 
                 # Monkey-patch requests to use proxy
-                import youtube_transcript_api._api as api_module
                 original_get = requests.get
                 
                 def proxied_get(url, **kwargs):
@@ -113,15 +113,20 @@ def get_transcript_with_retry(video_id, max_retries=3):
             if attempt == max_retries - 1:
                 # Restore original requests.get before raising
                 if WEBSHARE_PROXY:
-                    requests.get = original_get
+                    try:
+                        requests.get = original_get
+                    except:
+                        pass
                 raise e
             continue
     
     return None, None
 
+
 def create_ai_summary(transcript, video_id, language):
-    """Create AI summary"""
+    """Create AI summary - NO PROXY for Groq"""
     try:
+        # Groq doesn't need or support proxy
         client = Groq(api_key=GROQ_API_KEY)
         truncated = transcript[:6000] + "..." if len(transcript) > 6000 else transcript
         
@@ -157,9 +162,13 @@ Write 8-10 stories. Keep total summary under 1200 words. Write in simple Hindi."
             temperature=0.3,
             max_tokens=2000
         )
-        return completion.choices[0].message.content.strip()
+        
+        summary = completion.choices[0].message.content.strip()
+        print(f"   ✅ AI summary created: {len(summary)} characters")
+        return summary
+        
     except Exception as e:
-        print(f"⚠️ AI summary failed: {str(e)}")
+        print(f"   ⚠️ AI summary failed: {str(e)}")
         return '\n'.join(get_summary(transcript, max_sentences=8))
 
 
@@ -182,13 +191,14 @@ def scrape_news_headlines(url, source_name):
         
         return list(set(headlines))[:30]
     except Exception as e:
-        print(f"⚠️ Scraping {source_name} failed: {str(e)}")
+        print(f"   ⚠️ Scraping {source_name} failed: {str(e)}")
         return []
 
 
 def verify_news_with_groq(all_summaries, scraped_news):
-    """Verify news"""
+    """Verify news - NO PROXY for Groq"""
     try:
+        # Groq doesn't need proxy
         client = Groq(api_key=GROQ_API_KEY)
         
         video_text = "\n\n".join([f"VIDEO {i+1}:\n{s[:800]}" for i, s in enumerate(all_summaries)])
@@ -216,14 +226,20 @@ Format:
             temperature=0.3,
             max_tokens=1000
         )
-        return completion.choices[0].message.content
-    except:
+        
+        result = completion.choices[0].message.content
+        print(f"   ✅ Verification completed")
+        return result
+        
+    except Exception as e:
+        print(f"   ⚠️ Verification failed: {str(e)}")
         return "Verification unavailable"
 
 
 def create_instagram_scripts(all_summaries, num_scripts, verification):
-    """Generate LONG viral scripts"""
+    """Generate LONG viral scripts - NO PROXY for Groq"""
     try:
+        # Groq doesn't need proxy
         client = Groq(api_key=GROQ_API_KEY)
         
         combined = "\n\n".join([f"VIDEO {i+1}:\n{s[:900]}" for i, s in enumerate(all_summaries)])
@@ -286,82 +302,22 @@ VERIFICATION: {verification[:600]}
    STORY FORMAT (Follow for each):
    - Story intro: "Pehli/Dusri/Tisri baat..." "Aur suno ek aur badi khabar..."
    - Main point with SPECIFIC details (WHO, WHAT, WHERE, WHEN, HOW MUCH)
-   - Example: "Supreme Court ne 31 January ko UGC ke naye rules par rok laga di. 
-              Court ne kaha ki ye rules discriminatory hain aur 19 March tak review karenge.
-              Student unions ने celebration की, social media par #UGCRulesScrapped trend kar raha hai!"
    - Add CONTEXT: "Pehle kya tha, ab kya ho gaya"
    - Add IMPACT: "Is decision se kaun benefit hoga, kya change hoga"
    - Personal reaction: "Ye toh bohot badi baat hai yaar!", "Kaafi controversial hai na?"
    - Transition: "Par wait, ek aur twist hai...", "Aur ab suno next story..."
    
-   Between EVERY story:
-   - Add conversational fillers: "Dekho ab ye...", "Ek minute rukko...", "Par ab twist aata hai..."
-   - Ask rhetorical questions: "Aur aap jaante ho kya hua?", "Ab suno kya bawaal hua..."
-   - Show emotions: "Seriously yaar!", "OMG this is huge!", "Kya scene ban gaya!"
-   
    Include SPECIFIC NUMBERS & NAMES in EVERY story:
    - "₹827 करोड़ की योजना", "15 लोगों की मौत", "7.2% GDP growth"
-   - "Nirmala Sitharaman ne kaha", "Amit Shah ने visit की", "Rahul Gandhi का statement"
-   - "Maharashtra में", "Supreme Court में", "31 January को"
+   - "Nirmala Sitharaman ne kaha", "Amit Shah ने visit की"
    
-   Use 10-12 emojis throughout (1 emoji per 30-40 words)
+   Use 10-12 emojis throughout
 
 💥 OUTRO SECTION (70-90 words):
-   - Line 1-2: Quick recap of TOP 3 headlines only
-   - Line 3-4: Share your opinion/reaction as influencer
-   - Line 5-6: Ask engaging question: "Aap kya sochte ho? Sahi hua ya galat?"
-   - Line 7-8: STRONG call-to-action:
-     * "Comment mein apni राय जरूर likho! 👇"
-     * "Agar informative laga toh LIKE karo! ❤️"
-     * "Aur haan, apne friends ke साथ SHARE जरूर karo! 📲"
-     * "Follow karo daily news updates के लिए! 🔥"
+   - Quick recap of TOP 3 headlines
+   - Ask engaging question
+   - STRONG call-to-action
    - Use 4-5 emojis
-   - End with: "Milte hain next video mein! Bye! 👋✨"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎭 LANGUAGE & TONE (VERY IMPORTANT!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-✅ LANGUAGE MIX:
-   - 55% Hindi (Devanagari script)
-   - 45% English (common words like: decision, trending, viral, shocking, economy, GDP, etc.)
-   - Natural code-switching: "Supreme Court ne decision लिया", "Economy grow हो रही है"
-
-✅ TONE:
-   - Talk like your BEST FRIEND telling gossip over chai ☕
-   - NOT like a news reporter or anchor!
-   - Use: "yaar", "dekho", "bhai", "guys", "doston", "suno", "wait"
-   - Show excitement: "OMG!", "Seriously!", "Kya baat hai!", "Kamal hai yaar!"
-
-✅ SENTENCE STRUCTURE:
-   - Mix short punchy sentences (5-8 words): "Ye toh kamaal hai! Dekho kya hua!"
-   - With longer detailed sentences (15-20 words): "Supreme Court ne kaha ki government ko teen mahine ke andar explanation dena hoga."
-   - Use line breaks for DRAMATIC PAUSES
-   - Every 3-4 sentences = 1 line break
-
-✅ EMOTIONAL EXPRESSIONS:
-   - Surprise: "Kya?! Seriously?! Ye toh shocking hai!"
-   - Anger: "Ye galat hai yaar! Kaafi bura hua!"
-   - Excitement: "OMG guys! Ye toh fantastic news hai!"
-   - Concern: "Thoda worrying hai ye situation... Dekhte hain kya hota hai."
-
-✅ EMOJIS (18-25 per script):
-   Use variety: 🔥 😱 💥 ⚡ 🚨 💔 ✅ ❌ 👊 📢 🇮🇳 💰 ⚖️ 😮 🤔 👇 ❤️ 📲 🎯 💪 😡 🎉 📊 🏛️
-   Placement: After impactful statements, not randomly
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌ STRICTLY AVOID (Will lead to rejection!)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-❌ Formal news language: "वित्त मंत्री निर्मला सीतारमण ने आज कहा कि..."
-❌ Scripts under 450 words (WILL BE REJECTED!)
-❌ Covering same stories in multiple scripts
-❌ Listing stories without details/context/reactions
-❌ Pure English sentences
-❌ Boring monotonous tone
-❌ Missing numbers, names, dates
-❌ Too few emojis (less than 15)
-❌ No line breaks (wall of text)
 
 📋 OUTPUT FORMAT (EXACT):
 
@@ -373,10 +329,6 @@ WORD COUNT: [Must show 450-550]
 ════════════════════════════════════════════════════════
 
 [COMPLETE 450-550 WORD SCRIPT IN HINGLISH]
-[Follow all formatting rules]
-[Use 18-25 emojis]
-[Cover 7-9 different stories with full details]
-[Add line breaks for readability]
 
 ════════════════════════════════════════════════════════
 SCRIPT 2
@@ -386,7 +338,6 @@ WORD COUNT: [Must show 450-550]
 ════════════════════════════════════════════════════════
 
 [COMPLETELY DIFFERENT 450-550 WORD SCRIPT]
-[Different stories from Script 1]
 
 ... Continue for ALL {num_scripts} scripts
 
@@ -397,7 +348,7 @@ NOW GENERATE ALL {num_scripts} COMPLETE SCRIPTS:"""
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are India's #1 viral Instagram Reels creator. Your scripts get MILLIONS of views because they're LONG (500+ words), DETAILED, EMOTIONAL, and ENGAGING. You NEVER write short boring scripts. You talk like a friend sharing exciting gossip, NOT a news anchor. Each script MUST be 450-550 words minimum with 7-9 detailed stories. Make it SUPER VIRAL!"
+                    "content": "You are India's #1 viral Instagram Reels creator. Your scripts get MILLIONS of views because they're LONG (500+ words), DETAILED, EMOTIONAL, and ENGAGING. Each script MUST be 450-550 words minimum with 7-9 detailed stories."
                 },
                 {"role": "user", "content": prompt}
             ],
@@ -405,8 +356,12 @@ NOW GENERATE ALL {num_scripts} COMPLETE SCRIPTS:"""
             max_tokens=6000
         )
         
-        return completion.choices[0].message.content
+        result = completion.choices[0].message.content
+        print(f"   ✅ Scripts generated: {len(result)} characters")
+        return result
+        
     except Exception as e:
+        print(f"   ⚠️ Script generation failed: {str(e)}")
         return f"Error: {str(e)}"
 
 
@@ -505,6 +460,7 @@ def upload_to_sheets(scripts, video_count, credibility):
             worksheet.update(f'A{next_row}', rows)
             worksheet.columns_auto_resize(0, 9)
         
+        print(f"   ✅ Uploaded {len(scripts)} scripts to Google Sheets")
         return spreadsheet.url
         
     except Exception as e:
@@ -519,7 +475,7 @@ def home():
     return jsonify({
         'status': 'online',
         'service': 'Instagram Reels Script Generator API',
-        'version': '2.0.0',
+        'version': '2.0.1',
         'endpoints': {
             'POST /generate': 'Generate long viral scripts from YouTube videos',
             'GET /health': 'Check API health'
@@ -528,7 +484,8 @@ def home():
             'script_length': '450-550 words per script',
             'stories_per_script': '7-9 different stories',
             'language': 'Hinglish (55% Hindi + 45% English)',
-            'tone': 'Conversational influencer style'
+            'tone': 'Conversational influencer style',
+            'proxy_enabled': bool(WEBSHARE_PROXY)
         }
     }), 200
 
@@ -538,6 +495,7 @@ def health():
     """Health check"""
     has_groq = bool(GROQ_API_KEY)
     has_google = bool(GOOGLE_CREDS_JSON)
+    has_proxy = bool(WEBSHARE_PROXY)
     
     return jsonify({
         'status': 'healthy',
@@ -545,6 +503,7 @@ def health():
         'config': {
             'groq_api_configured': has_groq,
             'google_sheets_configured': has_google,
+            'proxy_configured': has_proxy,
             'sheet_name': GOOGLE_SHEET_NAME
         }
     }), 200
@@ -619,7 +578,7 @@ def generate_scripts():
                 all_summaries.append(summary)
                 processed_count += 1
                 
-                print(f"✅ Video {idx+1} processed - Summary: {len(summary)} chars")
+                print(f"✅ Video {idx+1} processed successfully")
                 
             except Exception as e:
                 print(f"❌ Error processing video {idx+1}: {str(e)}")
@@ -676,7 +635,8 @@ def generate_scripts():
                         'number': s['number'],
                         'title': s['title'],
                         'theme': s['theme'],
-                        'word_count': s['word_count']
+                        'word_count': s['word_count'],
+                        'content_preview': s['content'][:200] + '...' if len(s['content']) > 200 else s['content']
                     } for s in parsed
                 ]
             }
