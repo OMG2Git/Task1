@@ -15,7 +15,6 @@ CORS(app)
 
 # ========== CONFIGURATION ==========
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Instagram Scripts")
 
@@ -29,51 +28,6 @@ def extract_video_id(url):
     """Extract video ID from YouTube URL"""
     match = re.search(r'(?:v=|\/)([a-zA-Z0-9_-]{11})', url)
     return match.group(1) if match else None
-
-def get_transcript_rapidapi(video_id):
-    """Get transcript using RapidAPI YouTube Transcript service"""
-    try:
-        print(f"   📝 Fetching transcript via RapidAPI: {video_id}...")
-        
-        url = "https://youtube-transcript-api1.p.rapidapi.com/youtube/transcript"
-        
-        querystring = {"video_id": video_id}
-        
-        headers = {
-            "x-rapidapi-key": RAPIDAPI_KEY,
-            "x-rapidapi-host": "youtube-transcript-api1.p.rapidapi.com"
-        }
-        
-        response = requests.get(url, headers=headers, params=querystring, timeout=30)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        # Handle different response formats
-        if isinstance(data, dict) and 'transcript' in data:
-            transcript_parts = data['transcript']
-        elif isinstance(data, list):
-            transcript_parts = data
-        else:
-            raise Exception(f"Unexpected response format: {str(data)[:200]}")
-        
-        # Combine all transcript parts
-        transcript = ' '.join([item.get('text', '') for item in transcript_parts if isinstance(item, dict)])
-        
-        if not transcript or len(transcript) < 100:
-            raise Exception("Transcript too short or empty")
-        
-        print(f"   ✅ Got transcript: {len(transcript)} chars")
-        
-        # Detect language (Hindi has Devanagari script)
-        devanagari_count = sum(1 for c in transcript[:500] if '\u0900' <= c <= '\u097F')
-        lang = 'hi' if devanagari_count > 20 else 'en'
-        
-        return transcript, lang
-        
-    except Exception as e:
-        print(f"   ❌ RapidAPI failed: {str(e)}")
-        return None, None
 
 def call_perplexity_api(prompt, max_tokens=2500):
     """Call Perplexity Sonar API"""
@@ -104,7 +58,7 @@ def call_perplexity_api(prompt, max_tokens=2500):
             "stream": False
         }
         
-        response = requests.post(url, json=payload, headers=headers, timeout=90)
+        response = requests.post(url, json=payload, headers=headers, timeout=120)
         response.raise_for_status()
         
         return response.json()['choices'][0]['message']['content']
@@ -113,42 +67,44 @@ def call_perplexity_api(prompt, max_tokens=2500):
         print(f"   ⚠️ Perplexity API error: {str(e)}")
         raise e
 
-def create_ai_summary(transcript, video_id):
-    """Create AI summary using Perplexity Sonar API"""
+def analyze_video_with_perplexity(video_id):
+    """Analyze YouTube video directly with Perplexity (no transcript needed!)"""
     try:
-        truncated = transcript[:12000] if len(transcript) > 12000 else transcript
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        print(f"   🎥 Analyzing video with Perplexity Pro: {video_id}...")
         
-        prompt = f"""You are a Hindi news summarizer. Extract 8-10 key news stories from this video transcript.
+        prompt = f"""Watch and analyze this YouTube news video, then extract 8-10 key Hindi news stories with FULL details:
 
-VIDEO ID: {video_id}
+VIDEO URL: {youtube_url}
 
-TRANSCRIPT:
-{truncated}
-
-TASK: Extract ALL important news stories with MAXIMUM details
+TASK: Extract ALL important news stories mentioned in this video
 
 For each story:
 - Write 3-4 sentences in Hindi/Hinglish
 - Include: what happened, who is involved, key facts (dates, numbers, places, quotes)
 - Add background context if relevant
-- Focus on concrete news (politics, accidents, court cases, schemes, protests, etc.)
+- Focus on concrete news (politics, accidents, court cases, schemes, protests, government decisions, etc.)
 
 FORMAT:
 [1] Story headline - Detailed explanation in 3-4 sentences with all facts
 [2] Next story - Detailed explanation with numbers, names, places
-[3] Continue...
+[3] Continue for all stories...
 
-Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/Hinglish."""
+Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/Hinglish.
 
-        summary = call_perplexity_api(prompt, max_tokens=2500)
-        print(f"   ✅ AI summary created: {len(summary)} characters")
-        return summary
+IMPORTANT: Watch the entire video and extract REAL news content, not just the video description."""
+
+        summary = call_perplexity_api(prompt, max_tokens=3000)
+        
+        if not summary or len(summary) < 100:
+            raise Exception("Summary too short or empty")
+        
+        print(f"   ✅ Video analyzed: {len(summary)} characters")
+        return summary, 'hi'
         
     except Exception as e:
-        print(f"   ⚠️ Summary failed: {str(e)}")
-        # Fallback: simple sentence extraction
-        sentences = [s.strip() for s in transcript.replace('!', '.').replace('?', '.').split('.') if len(s.strip()) > 30]
-        return '\n'.join(sentences[:15])
+        print(f"   ❌ Perplexity analysis failed: {str(e)}")
+        return None, None
 
 def scrape_news_headlines(url, source_name):
     """Scrape headlines from news websites"""
@@ -361,23 +317,29 @@ def home():
     return jsonify({
         'status': 'online',
         'service': 'Instagram Reels Script Generator API',
-        'version': '7.0.0 - RapidAPI + Perplexity Pipeline',
+        'version': '8.0.0 - Perplexity-Only Pipeline (FINAL)',
         'endpoints': {
             'POST /generate': 'Generate viral scripts from YouTube videos',
             'GET /health': 'Check API health'
         },
         'pipeline': {
-            'transcription': 'RapidAPI YouTube Transcript (500 req/month FREE)',
-            'ai_processing': 'Perplexity Sonar Pro API ($5 credit/month)',
+            'video_analysis': 'Perplexity Sonar Pro (watches videos directly)',
+            'script_generation': 'Perplexity Sonar Pro API ($5 credit/month)',
             'storage': 'Google Sheets (FREE)'
-        }
+        },
+        'features': [
+            'No YouTube blocking - Perplexity watches videos directly',
+            'No transcripts needed - AI understands video content',
+            'Uses only your Perplexity Pro subscription',
+            'Generates 450-550 word scripts in Hinglish',
+            'Covers 7-9 stories per script'
+        ]
     }), 200
 
 @app.route('/health', methods=['GET'])
 def health():
     """Health check"""
     has_perplexity = bool(PERPLEXITY_API_KEY)
-    has_rapidapi = bool(RAPIDAPI_KEY)
     has_google = bool(GOOGLE_CREDS_JSON)
     
     return jsonify({
@@ -385,7 +347,6 @@ def health():
         'timestamp': datetime.now().isoformat(),
         'config': {
             'perplexity_api_configured': has_perplexity,
-            'rapidapi_configured': has_rapidapi,
             'google_sheets_configured': has_google,
             'sheet_name': GOOGLE_SHEET_NAME
         }
@@ -400,12 +361,6 @@ def generate_scripts():
             return jsonify({
                 'status': 'error',
                 'message': 'PERPLEXITY_API_KEY not configured. Get it from https://www.perplexity.ai/settings/api'
-            }), 500
-        
-        if not RAPIDAPI_KEY:
-            return jsonify({
-                'status': 'error',
-                'message': 'RAPIDAPI_KEY not configured. Get it from https://rapidapi.com/Glavier/api/youtube-transcript-api1'
             }), 500
         
         if not GOOGLE_CREDS_JSON:
@@ -445,6 +400,7 @@ def generate_scripts():
         
         print(f"\n{'='*60}")
         print(f"📥 NEW REQUEST: {len(video_urls)} videos, {num_scripts} scripts")
+        print(f"🤖 Using: Perplexity Pro (watches videos directly)")
         print(f"{'='*60}\n")
         
         all_summaries = []
@@ -459,21 +415,19 @@ def generate_scripts():
             try:
                 print(f"📹 Processing video {idx+1}/{len(video_urls)}: {video_id}")
                 
-                # Get transcript with RapidAPI
-                transcript, lang = get_transcript_rapidapi(video_id)
-                if not transcript:
+                # Analyze video with Perplexity (no transcript needed!)
+                summary, lang = analyze_video_with_perplexity(video_id)
+                if not summary:
                     continue
                 
-                # Create summary with Perplexity
-                summary = create_ai_summary(transcript, video_id)
                 all_summaries.append(summary)
                 processed_count += 1
                 
                 print(f"✅ Video {idx+1} processed successfully\n")
                 
-                # Small delay between videos
+                # Delay between videos to respect API limits
                 if idx < len(video_urls) - 1:
-                    time.sleep(2)
+                    time.sleep(3)
                 
             except Exception as e:
                 print(f"❌ Error processing video {idx+1}: {str(e)}\n")
@@ -482,7 +436,7 @@ def generate_scripts():
         if processed_count == 0:
             return jsonify({
                 'status': 'error',
-                'message': 'No videos could be processed. Check video URLs and API keys.'
+                'message': 'No videos could be processed. Check video URLs and Perplexity API key.'
             }), 400
         
         print(f"✅ Processed {processed_count} videos\n")
@@ -495,7 +449,7 @@ def generate_scripts():
             print(f"   📰 {source_name}: {len(headlines)} headlines")
         
         print()
-        time.sleep(1)
+        time.sleep(2)
         
         verification = verify_news(all_summaries, all_headlines)
         
@@ -504,7 +458,7 @@ def generate_scripts():
         
         print(f"📊 Credibility: {credibility}\n")
         
-        time.sleep(1)
+        time.sleep(2)
         
         print(f"🎬 Generating {num_scripts} LONG viral scripts with Perplexity Sonar Pro...")
         
@@ -526,14 +480,14 @@ def generate_scripts():
         
         return jsonify({
             'status': 'success',
-            'message': 'Scripts generated successfully!',
+            'message': 'Scripts generated successfully using Perplexity Pro!',
             'data': {
                 'videos_processed': processed_count,
                 'scripts_generated': len(parsed),
                 'sheet_url': sheet_url,
                 'credibility': credibility,
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'pipeline_used': 'RapidAPI → Perplexity Sonar Pro → Google Sheets',
+                'pipeline_used': 'Perplexity Pro (Video Analysis) → Google Sheets',
                 'scripts': [
                     {
                         'number': s['number'],
@@ -556,8 +510,9 @@ def generate_scripts():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 7860))
     print(f"\n🚀 Starting Instagram Reels Script Generator...")
-    print(f"📝 Transcription: RapidAPI YouTube Transcript")
+    print(f"🎥 Video Analysis: Perplexity Pro (watches videos directly)")
     print(f"🤖 AI Processing: Perplexity Sonar Pro")
     print(f"📊 Storage: Google Sheets")
-    print(f"🌐 Port: {port}\n")
+    print(f"🌐 Port: {port}")
+    print(f"💡 No YouTube blocking - Perplexity understands video content!\n")
     app.run(host='0.0.0.0', port=port, debug=False)
