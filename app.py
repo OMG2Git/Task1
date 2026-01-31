@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google import genai
-from google.genai import types
+from google.genai.types import GenerateContentConfig, Part, Content
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -51,21 +51,23 @@ def get_transcript_with_gemini(video_id, max_retries=3):
             
             # Gemini 2.0 Flash can directly process YouTube URLs!
             response = gemini_client.models.generate_content(
-                model='gemini-2.0-flash-exp',  # FREE model, perfect for transcription
-                contents=[
-                    types.Part.from_text(
-                        "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
-                        "Include ALL spoken words in the original language (Hindi/Marathi/English). "
-                        "Do NOT summarize - provide the FULL transcript exactly as spoken. "
-                        "Format: Just the transcript text, no extra commentary."
-                    ),
-                    types.Part.from_uri(
-                        file_uri=youtube_url,
-                        mime_type="video/youtube"
-                    )
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,  # Low temperature for accuracy
+                model='gemini-2.0-flash-exp',
+                contents=Content(
+                    parts=[
+                        Part.from_text(
+                            "Please provide a complete, accurate, verbatim transcript of this YouTube video. "
+                            "Include ALL spoken words in the original language (Hindi/Marathi/English). "
+                            "Do NOT summarize - provide the FULL transcript exactly as spoken. "
+                            "Format: Just the transcript text, no extra commentary."
+                        ),
+                        Part.from_uri(
+                            file_uri=youtube_url,
+                            mime_type="video/*"
+                        )
+                    ]
+                ),
+                config=GenerateContentConfig(
+                    temperature=0.1,
                     max_output_tokens=8000
                 )
             )
@@ -75,7 +77,7 @@ def get_transcript_with_gemini(video_id, max_retries=3):
             if transcript_text and len(transcript_text) > 100:
                 print(f"   ✅ Got transcript: {len(transcript_text)} chars")
                 
-                # Detect language
+                # Detect language (Devanagari script = Hindi/Marathi)
                 devanagari_count = sum(1 for c in transcript_text[:500] if '\u0900' <= c <= '\u097F')
                 lang = 'hi' if devanagari_count > 20 else 'en'
                 
@@ -133,7 +135,7 @@ Write 8-10 stories. Keep total summary under 1500 words. Write in simple Hindi/H
         response = gemini_client.models.generate_content(
             model='gemini-2.0-flash-exp',
             contents=prompt,
-            config=types.GenerateContentConfig(
+            config=GenerateContentConfig(
                 temperature=0.3,
                 max_output_tokens=2500
             )
@@ -207,7 +209,7 @@ EXPLANATION: [Brief explanation of the score]"""
         response = gemini_client.models.generate_content(
             model='gemini-2.0-flash-exp',
             contents=prompt,
-            config=types.GenerateContentConfig(
+            config=GenerateContentConfig(
                 temperature=0.2,
                 max_output_tokens=1500
             )
@@ -270,7 +272,7 @@ Generate ALL {num_scripts} scripts NOW. Each must be DIFFERENT and UNIQUE."""
         response = gemini_client.models.generate_content(
             model='gemini-2.0-flash-exp',
             contents=prompt,
-            config=types.GenerateContentConfig(
+            config=GenerateContentConfig(
                 temperature=0.95,  # High creativity
                 max_output_tokens=8000
             )
@@ -393,7 +395,7 @@ def home():
         'status': 'online',
         'service': 'Instagram Reels Script Generator API (Gemini-Powered)',
         'version': '3.0.0',
-        'model': 'Gemini 2.0 Flash (FREE)',
+        'model': 'Gemini 2.0 Flash Experimental (FREE)',
         'endpoints': {
             'POST /generate': 'Generate viral scripts from YouTube videos',
             'GET /health': 'Check API health'
